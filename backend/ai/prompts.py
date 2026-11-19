@@ -186,3 +186,94 @@ USER CIRCUIT DESCRIPTION:
 
 {input}
 """
+
+
+TESTBENCH_GENERATION_PROMPT = """
+You are an expert digital verification engineer specializing in
+Verilog-2001 and Icarus Verilog.
+
+Generate a complete, self-checking Verilog testbench for the
+provided design module.
+
+Return ONLY valid JSON with exactly these keys:
+{
+  "testbench_code": "Complete Verilog testbench",
+  "explanation": "Brief explanation of test coverage"
+}
+
+STRICT RULES:
+
+1. Analyze the exact module name, input ports, output ports and widths.
+2. Instantiate the exact provided design module.
+3. Use reg for DUT inputs and wire for DUT outputs.
+4. Declare integer failures and total_tests.
+5. Use EXACTLY ONE initial begin...end block in the testbench.
+6. Never create a nested initial block.
+7. Never use assert statements.
+8. Never use SystemVerilog constructs.
+9. Use only Verilog-2001 syntax compatible with Icarus Verilog.
+10. Initialize failures = 0 and total_tests = 0.
+11. Include $dumpfile("logicforge_waveform.vcd").
+12. Include $dumpvars(0, testbench_module_name).
+13. Keep waveform setup and all testing in the same initial block.
+14. Apply input values, wait #10, then check outputs.
+15. Calculate expected outputs independently of the DUT.
+16. Use case inequality (!==) for output comparisons.
+17. For EVERY test case:
+    a. Increment total_tests exactly once.
+    b. Compare actual output with expected output.
+    c. On success, display a PASS message.
+    d. On failure, increment failures and display expected
+       and actual output values.
+18. Test all possible input combinations for small combinational
+    circuits (up to 8 total input bits).
+19. For larger circuits, include meaningful normal, boundary,
+    and edge cases.
+20. Do not repeat test cases unnecessarily.
+21. Do not print OVERALL PASS unless failures == 0.
+22. Print OVERALL FAIL if failures != 0.
+23. Print total_tests and failures in the final summary.
+24. Call $finish exactly once, at the end of the initial block.
+25. Do not use tasks, functions, fork, or additional initial blocks.
+26. Do not invent ports or functionality.
+27. Do not include Markdown code fences.
+28. Escape JSON strings correctly.
+
+REQUIRED TESTBENCH STRUCTURE:
+
+module testbench_module_name;
+
+    // Input and output declarations
+    // DUT instantiation
+    integer failures;
+    integer total_tests;
+
+    initial begin
+        failures = 0;
+        total_tests = 0;
+
+        $dumpfile("logicforge_waveform.vcd");
+        $dumpvars(0, testbench_module_name);
+
+        // Apply test vectors and check each result here.
+        // No nested initial blocks.
+
+        $display("Total tests: %0d", total_tests);
+        $display("Failures: %0d", failures);
+
+        if (failures == 0)
+            $display("OVERALL PASS");
+        else
+            $display("OVERALL FAIL");
+
+        $finish;
+    end
+
+endmodule
+
+DESIGN MODULE:
+
+{module_code}
+
+Generate a testbench specifically for this module.
+"""

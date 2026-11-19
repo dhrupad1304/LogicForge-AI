@@ -1,8 +1,9 @@
+
 import json
 import urllib.error
 import urllib.request
 
-from ai.prompts import VERILOG_PROMPT
+from ai.prompts import VERILOG_PROMPT, TESTBENCH_GENERATION_PROMPT
 
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -84,7 +85,10 @@ def generate_verilog(user_input: str) -> dict:
         ]
 
         for field in required_fields:
-            if not isinstance(result.get(field), str) or not result[field].strip():
+            if (
+                not isinstance(result.get(field), str)
+                or not result[field].strip()
+            ):
                 raise RuntimeError(
                     f"AI response is missing a valid '{field}' field."
                 )
@@ -114,6 +118,7 @@ def generate_verilog(user_input: str) -> dict:
         raise RuntimeError(
             "Ollama generation timed out. Try a simpler circuit prompt."
         ) from exc
+
 
 def debug_verilog(
     module_code: str,
@@ -214,7 +219,10 @@ Return ONLY valid JSON with exactly these string fields:
         ]
 
         for field in required_fields:
-            if not isinstance(result.get(field), str) or not result[field].strip():
+            if (
+                not isinstance(result.get(field), str)
+                or not result[field].strip()
+            ):
                 raise RuntimeError(
                     f"AI debugging response is missing '{field}'."
                 )
@@ -247,4 +255,125 @@ Return ONLY valid JSON with exactly these string fields:
     except TimeoutError as exc:
         raise RuntimeError(
             "AI debugging timed out. Please try again."
+        ) from exc
+
+
+def generate_testbench(module_code: str) -> dict:
+    """Generate a self-checking Verilog testbench using local Ollama."""
+
+    if not module_code or not module_code.strip():
+        raise ValueError("Verilog module code cannot be empty.")
+
+    prompt = TESTBENCH_GENERATION_PROMPT.replace(
+        "{module_code}",
+        module_code.strip()
+    )
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert hardware verification engineer. "
+                    "Generate concise, valid Verilog-2001 testbenches. "
+                    "Keep the explanation to one or two short sentences. "
+                    "Keep the testbench compact and avoid unnecessary comments. "
+                    "Use exactly one initial block, no assert statements, "
+                    "and explicit if comparisons with failure counters. "
+                    "Return a single valid JSON object with exactly these "
+                    "string fields: testbench_code and explanation. "
+                    "Do not include Markdown code fences."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        "format": "json",
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+            "num_predict": 1800,
+            "num_ctx": 8192,
+        },
+    }
+
+    request = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response:
+            response_data = json.loads(
+                response.read().decode("utf-8")
+            )
+
+        content = response_data.get("message", {}).get("content", "")
+        done_reason = response_data.get("done_reason", "unknown")
+
+        # Temporary diagnostics to inspect Ollama's actual response.
+        print("\n========== OLLAMA TESTBENCH DIAGNOSTICS ==========")
+        print("Model:", OLLAMA_MODEL)
+        print("Response length:", len(content))
+        print("Done reason:", done_reason)
+        print("Raw response:")
+        print(repr(content))
+        print("==================================================\n")
+
+        if not content.strip():
+            raise RuntimeError(
+                "Ollama returned an empty testbench response."
+            )
+
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Ollama returned malformed testbench JSON. "
+                f"Parser detail: {exc}. "
+                f"Done reason: {done_reason}. "
+                f"Response length: {len(content)}."
+            ) from exc
+
+        if not isinstance(result, dict):
+            raise RuntimeError(
+                "Ollama testbench response must be a JSON object."
+            )
+
+        required_fields = ["testbench_code", "explanation"]
+
+        for field in required_fields:
+            if (
+                not isinstance(result.get(field), str)
+                or not result[field].strip()
+            ):
+                raise RuntimeError(
+                    f"AI response is missing a valid '{field}' field."
+                )
+
+        result["testbench_code"] = clean_verilog(
+            result["testbench_code"]
+        )
+
+        return result
+
+    except urllib.error.HTTPError as exc:
+        error_details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Ollama HTTP error {exc.code}: {error_details}"
+        ) from exc
+
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "Cannot connect to Ollama. Make sure Ollama is running."
+        ) from exc
+
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "Testbench generation timed out. Please try again."
         ) from exc

@@ -447,6 +447,10 @@ export default function Home() {
 const [debugging, setDebugging] = useState(false);
 const [debugResult, setDebugResult] = useState<any>(null);
 const [applyingFix, setApplyingFix] = useState(false);
+// AI Testbench Generator state
+const [generatingTestbench, setGeneratingTestbench] = useState(false);
+const [testbenchExplanation, setTestbenchExplanation] = useState("");
+const [testbenchError, setTestbenchError] = useState("");
 
   const generateCode = async () => {
     if (!prompt.trim()) {
@@ -550,6 +554,44 @@ const [applyingFix, setApplyingFix] = useState(false);
       setDebugging(false);
     }
   };
+
+
+const generateTestbench = async () => {
+  if (!moduleCode.trim()) {
+    setTestbenchError("Please provide a Verilog module first.");
+    return;
+  }
+
+  setGeneratingTestbench(true);
+  setTestbenchError("");
+  setTestbenchExplanation("");
+
+  try {
+    const response = await API.post("/generate-testbench", {
+      module_code: moduleCode,
+    });
+
+    if (!response.data.success || !response.data.testbench_code) {
+      throw new Error("AI did not return valid testbench code.");
+    }
+
+    setTestbenchCode(response.data.testbench_code);
+    setTestbenchExplanation(response.data.explanation || "");
+
+    setVcd("");
+    setSimulationSuccess(null);
+    setOutput("AI testbench generated. Run simulation to verify it.");
+  } catch (error: any) {
+    setTestbenchError(
+      error.response?.data?.detail ||
+      error.message ||
+      "Testbench generation failed. Please try again."
+    );
+  } finally {
+    setGeneratingTestbench(false);
+  }
+};
+
 
   const applyDebugFix = () => {
     if (
@@ -683,10 +725,42 @@ const [applyingFix, setApplyingFix] = useState(false);
                   Test vectors and verification logic
                 </p>
               </div>
-              <span className="rounded-md border border-[#365B43] bg-[#17251B] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#62ECA0]">
-                Verification
-              </span>
             </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={generateTestbench}
+                  disabled={generatingTestbench || loading || !moduleCode.trim()}
+                  className="rounded-lg border border-[#365B43] bg-[#17251B] px-3 py-2 text-xs font-semibold text-[#62ECA0] transition hover:border-[#39E58C] hover:bg-[#203528] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {generatingTestbench
+                    ? "Generating..."
+                    : "✦ Generate with AI"}
+                </button>
+
+                <span className="rounded-md border border-[#365B43] bg-[#17251B] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#62ECA0]">
+                  Verification
+                </span>
+              </div>
+
+
+                {testbenchError && (
+                 <div className="mb-4 rounded-xl border border-red-900/60 bg-red-950/20 p-4 text-sm text-red-300">
+                   {testbenchError}
+                 </div>
+                )}
+
+        {testbenchExplanation && (
+          <div className="mb-6 rounded-xl border border-[#294432] bg-[#101713] p-4">
+            <h3 className="mb-2 font-bold text-[#62ECA0]">
+              ✦ AI Testbench Analysis
+            </h3>
+            <p className="whitespace-pre-wrap text-sm leading-6 text-[#B7C9BD]">
+              {testbenchExplanation}
+            </p>
+          </div>
+        )}
+
 
             <Editor
               height="350px"

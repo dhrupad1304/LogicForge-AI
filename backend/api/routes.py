@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from services.ai_service import generate_verilog, debug_verilog
+from services.ai_service import generate_verilog, debug_verilog, generate_testbench
 from services.simulation_service import simulate
 
 router = APIRouter()
@@ -22,7 +22,9 @@ class DebugRequest(BaseModel):
     module_code: str = Field(min_length=1, max_length=50000)
     testbench_code: str = Field(min_length=1, max_length=50000)
     error: str = Field(default="", max_length=20000)
-    output: str = Field(default="", max_length=20000)    
+    output: str = Field(default="", max_length=20000)
+class TestbenchRequest(BaseModel):
+    module_code: str = Field(min_length=1, max_length=50000)
 
 
 @router.post("/generate")
@@ -78,6 +80,24 @@ def debug_code(req: DebugRequest):
             testbench_code=req.testbench_code,
             error=req.error,
             output=req.output
+        )
+
+        return {
+            "success": True,
+            **result
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+@router.post("/generate-testbench")
+def generate_testbench_code(req: TestbenchRequest):
+    try:
+        result = generate_testbench(
+            module_code=req.module_code
         )
 
         return {
