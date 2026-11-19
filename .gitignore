@@ -18,3 +18,18 @@ __pycache__/
 # OS/editor
 .DS_Store
 .vscode/
+
+# Generated files
+frontend/tsconfig.tsbuildinfo
+__pycache__/
+*.py[cod]
+
+# Local environment
+.env
+.venv/
+
+# Next.js generated files
+frontend/next-env.d.ts
+
+# Local backup files
+backend/services/ai_service_openai_backup.py

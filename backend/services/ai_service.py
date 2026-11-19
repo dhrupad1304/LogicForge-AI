@@ -1,15 +1,250 @@
-from openai import OpenAI
+import json
+import urllib.error
+import urllib.request
+
 from ai.prompts import VERILOG_PROMPT
-from config import OPENAI_API_KEY
 
-client = OpenAI(api_key=OPENAI_API_KEY)
 
-def generate_verilog(user_input: str):
-    prompt = VERILOG_PROMPT.format(input=user_input)
+OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_MODEL = "qwen2.5-coder:3b"
 
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
+
+def clean_verilog(code: str) -> str:
+    """Remove accidental Markdown code fences from generated Verilog."""
+
+    code = code.strip()
+
+    if code.startswith("```"):
+        lines = code.splitlines()
+
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+
+        code = "\n".join(lines).strip()
+
+    return code
+
+
+def generate_verilog(user_input: str) -> dict:
+    """Generate Verilog module and testbench using local Ollama."""
+
+    if not user_input or not user_input.strip():
+        raise ValueError("Circuit description cannot be empty.")
+
+    prompt = VERILOG_PROMPT.format(input=user_input.strip())
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert digital hardware engineer. "
+                    "Return only valid JSON matching the requested structure. "
+                    "Do not include Markdown code fences."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        "format": "json",
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+        },
+    }
+
+    request = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
 
-    return response.choices[0].message.content
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+
+        content = response_data.get("message", {}).get("content")
+
+        if not content:
+            raise RuntimeError("Ollama returned an empty response.")
+
+        result = json.loads(content)
+
+        required_fields = [
+            "module_code",
+            "testbench_code",
+            "explanation",
+        ]
+
+        for field in required_fields:
+            if not isinstance(result.get(field), str) or not result[field].strip():
+                raise RuntimeError(
+                    f"AI response is missing a valid '{field}' field."
+                )
+
+        result["module_code"] = clean_verilog(result["module_code"])
+        result["testbench_code"] = clean_verilog(result["testbench_code"])
+
+        return result
+
+    except urllib.error.HTTPError as exc:
+        error_details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Ollama HTTP error {exc.code}: {error_details}"
+        ) from exc
+
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "Cannot connect to Ollama. Make sure Ollama is running."
+        ) from exc
+
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Ollama returned an invalid JSON response."
+        ) from exc
+
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "Ollama generation timed out. Try a simpler circuit prompt."
+        ) from exc
+
+def debug_verilog(
+    module_code: str,
+    testbench_code: str,
+    error: str = "",
+    output: str = ""
+) -> dict:
+    """Analyze failed Verilog simulation and suggest corrected code."""
+
+    if not module_code.strip() or not testbench_code.strip():
+        raise ValueError("Both module code and testbench code are required.")
+
+    debug_prompt = f"""
+You are an expert Verilog RTL engineer and hardware verification engineer.
+
+Analyze the following Verilog design and testbench using the simulation
+diagnostics provided.
+
+SIMULATION ERROR:
+{error or "No compiler error reported."}
+
+SIMULATION OUTPUT:
+{output or "No simulation output available."}
+
+DESIGN MODULE:
+{module_code}
+
+TESTBENCH:
+{testbench_code}
+
+YOUR TASK:
+1. Identify the actual root cause of the error or failed test.
+2. Explain the issue in simple technical language.
+3. Correct the Verilog module and/or testbench.
+4. Preserve the original design functionality and module interface.
+5. Do not introduce unnecessary clock, reset, or sequential logic.
+6. Do not remove failing test cases merely to make the simulation pass.
+7. Do not claim the fix is verified. It must be simulated again.
+8. If the original code is already correct, explain why and return it unchanged.
+
+Return ONLY valid JSON with exactly these string fields:
+{{
+    "root_cause": "The identified problem",
+    "explanation": "Detailed explanation of the problem and solution",
+    "fixed_module_code": "Complete corrected Verilog module",
+    "fixed_testbench_code": "Complete corrected Verilog testbench",
+    "changes_made": "Summary of modifications"
+}}
+"""
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise Verilog debugging assistant. "
+                    "Return only valid JSON. Preserve the design interface "
+                    "and never remove tests to hide failures."
+                ),
+            },
+            {
+                "role": "user",
+                "content": debug_prompt,
+            },
+        ],
+        "format": "json",
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+        },
+    }
+
+    request = urllib.request.Request(
+        OLLAMA_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+
+        content = response_data.get("message", {}).get("content")
+
+        if not content:
+            raise RuntimeError("Ollama returned an empty debugging response.")
+
+        result = json.loads(content)
+
+        required_fields = [
+            "root_cause",
+            "explanation",
+            "fixed_module_code",
+            "fixed_testbench_code",
+            "changes_made",
+        ]
+
+        for field in required_fields:
+            if not isinstance(result.get(field), str) or not result[field].strip():
+                raise RuntimeError(
+                    f"AI debugging response is missing '{field}'."
+                )
+
+        result["fixed_module_code"] = clean_verilog(
+            result["fixed_module_code"]
+        )
+        result["fixed_testbench_code"] = clean_verilog(
+            result["fixed_testbench_code"]
+        )
+
+        return result
+
+    except urllib.error.HTTPError as exc:
+        error_details = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Ollama HTTP error {exc.code}: {error_details}"
+        ) from exc
+
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            "Cannot connect to Ollama. Make sure Ollama is running."
+        ) from exc
+
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "Ollama returned an invalid JSON debugging response."
+        ) from exc
+
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "AI debugging timed out. Please try again."
+        ) from exc
