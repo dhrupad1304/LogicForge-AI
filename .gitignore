@@ -33,3 +33,6 @@ frontend/next-env.d.ts
 
 # Local backup files
 backend/services/ai_service_openai_backup.py
+
+# User workspace files managed by the app
+backend/workspace/

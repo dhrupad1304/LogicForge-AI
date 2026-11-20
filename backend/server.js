@@ -1,13 +1,21 @@
 const express = require("express");
 const cors = require("cors");
 const OpenAI = require("openai");
-require("dotenv").config();
 
+// Load backend/.env with Node's built-in loader (Node 20.12+), so the
+// separate "dotenv" package is not needed.
+try {
+  process.loadEnvFile(require("path").join(__dirname, ".env"));
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+}
 
 const app = express();
-const PORT = 8000;
+// Port 8000 belongs to the main Python backend (uvicorn), so this legacy
+// OpenAI server uses 8001 unless PORT is set.
+const PORT = Number(process.env.PORT) || 8001;
 
-app.use(cors());
+app.use(cors({ origin: ["http://localhost:3000", "http://127.0.0.1:3000"] }));
 app.use(express.json());
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -15,7 +23,11 @@ const openai = new OpenAI({
 
 app.post("/generate", async (req, res) => {
   try {
-    const { prompt } = req.body;
+    const { prompt } = req.body || {};
+
+    if (typeof prompt !== "string" || !prompt.trim()) {
+      return res.status(400).json({ error: "A prompt is required." });
+    }
 
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",

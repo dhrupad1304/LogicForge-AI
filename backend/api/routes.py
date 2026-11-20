@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from services.ai_service import generate_verilog, debug_verilog, generate_testbench
 from services.simulation_service import simulate
+from services import project_service
 
 router = APIRouter()
 
@@ -38,6 +39,8 @@ def generate(req: Prompt):
             "module_code": result["module_code"],
             "testbench_code": result["testbench_code"],
             "explanation": result["explanation"],
+            # Compile / dry-run / auto-repair report (see verify_and_repair).
+            "verification": result.get("verification"),
         }
 
     except ValueError as exc:
@@ -110,3 +113,75 @@ def generate_testbench_code(req: TestbenchRequest):
 
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+    
+class ProjectItemRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    item_type: str = Field(default="file")
+
+
+class ProjectReadRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+
+
+class ProjectSaveRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+    content: str = Field(max_length=500000)
+
+
+class ProjectRenameRequest(BaseModel):
+    old_path: str = Field(min_length=1, max_length=500)
+    new_path: str = Field(min_length=1, max_length=500)
+
+
+class ProjectDeleteRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+
+
+@router.get("/project/list")
+def project_list(path: str = ""):
+    try:
+        return project_service.list_directory(path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/project/create")
+def project_create(req: ProjectItemRequest):
+    try:
+        return project_service.create_item(req.path, req.item_type)
+    except (ValueError, FileExistsError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/project/read")
+def project_read(req: ProjectReadRequest):
+    try:
+        return project_service.read_file(req.path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/project/save")
+def project_save(req: ProjectSaveRequest):
+    try:
+        return project_service.save_file(req.path, req.content)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/project/rename")
+def project_rename(req: ProjectRenameRequest):
+    try:
+        return project_service.rename_item(req.old_path, req.new_path)
+    except (ValueError, FileNotFoundError, FileExistsError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/project/delete")
+def project_delete(req: ProjectDeleteRequest):
+    try:
+        return project_service.delete_item(req.path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
