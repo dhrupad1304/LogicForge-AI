@@ -22,6 +22,51 @@
 
 ---
 
+## Why LogicForge
+
+### The problem
+
+**AI writes Verilog that looks right but often isn't, and most people can't tell.**
+
+Students, and increasingly engineers, ask ChatGPT, Claude or Copilot for
+Verilog. The code compiles and looks plausible, but it is often wrong: wrong
+bit widths, `reg`/`wire` mistakes, logic that fails for some inputs. Worse,
+when the same AI also writes the testbench, the testbench tends to share the
+design's mistakes and still print "PASS".
+
+A beginner has no way to notice: writing a proper self-checking testbench is
+exactly the skill they don't have yet, and installing and running a simulator
+is a hurdle of its own.
+
+### What LogicForge solves
+
+1. **"Is this code actually correct?"** The testbench structure is generated
+   by code, not by the AI, so it cannot be wrong. The design is checked
+   against an **independently written** reference model, and PASS is only
+   reported when tests really ran and really passed. Every failure shows the
+   exact inputs, the expected values and the actual values.
+2. **Testbench drudgery.** Exhaustive input testing, clocks, resets and
+   comparisons are generated automatically, also for designs you wrote yourself.
+3. **The setup barrier.** Simulator, waveform viewer and schematic run in the
+   browser, with nothing to install.
+
+**In one sentence:** LogicForge solves *"I can't trust AI-generated Verilog
+and I can't verify it myself"* for the circuits students and learners
+actually work with. As more hardware code is written with AI, the bottleneck
+moves from *writing* code to *trusting* it, and that is the part this project
+addresses.
+
+### Who it's for
+
+- **Students learning digital design.** See the code, a test that really
+  checks it, the waveform, and the hardware it becomes, for every circuit.
+- **Anyone checking their own small designs.** Paste a module, click
+  **Generate testbench**, and get exhaustive tests with an honest verdict.
+- **Teachers and TAs** who want verified examples of standard circuits.
+
+It is not a replacement for professional EDA tools (Vivado, Quartus,
+Questa, formal verification) used on large production designs.
+
 ## What it does
 
 Type *"full adder"* and press **Generate**. LogicForge:
@@ -198,7 +243,15 @@ DEPLOY.md                  deployment guide
 - **Generation quality depends on the model.** Small local models handle
   gates, adders, multiplexers, counters and flip-flops well; complex designs
   (FSMs, UARTs, ALUs) need a larger model such as a free Groq model or Claude.
-  Verification always tells you honestly whether the result works.
+  For those, LogicForge *detects* that a design is wrong, but a small model
+  may not be able to produce a correct one: detecting a problem is not the
+  same as fixing it.
+- **"Verified" means "agrees with an independent reference", not formally
+  proven.** If both AI-written versions misunderstand an ambiguous request
+  in the same way, they can agree and still be wrong. This is rare, but
+  possible.
+- **Not industry-scale verification:** no timing analysis, coverage metrics,
+  formal proofs or large multi-file projects.
 - **Ambiguous descriptions** (e.g. which way a shift register shifts) can
   make the design and the reference disagree. Be specific about ports and behaviour.
 - **Hosted demo on free plans:** the backend sleeps when idle (the first
