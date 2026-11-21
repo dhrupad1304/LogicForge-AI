@@ -3,7 +3,12 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from services.ai_service import generate_verilog, debug_verilog, generate_testbench
+import config
+from services.ai_service import debug_verilog
+from services.generation_pipeline import (
+    generate_design_and_testbench,
+    generate_testbench_for,
+)
 from services.simulation_service import simulate
 from services import project_service
 
@@ -28,10 +33,23 @@ class TestbenchRequest(BaseModel):
     module_code: str = Field(min_length=1, max_length=50000)
 
 
+@router.get("/model")
+def model_info():
+    """The AI model the backend is configured to use."""
+    return {
+        "provider": config.AI_PROVIDER,
+        "model": (
+            config.ANTHROPIC_MODEL if config.AI_PROVIDER == "anthropic"
+            else config.OLLAMA_MODEL
+        ),
+        "label": config.model_label(),
+    }
+
+
 @router.post("/generate")
 def generate(req: Prompt):
     try:
-        result = generate_verilog(req.prompt)
+        result = generate_design_and_testbench(req.prompt)
 
         return {
             "success": True,
@@ -99,9 +117,7 @@ def debug_code(req: DebugRequest):
 @router.post("/generate-testbench")
 def generate_testbench_code(req: TestbenchRequest):
     try:
-        result = generate_testbench(
-            module_code=req.module_code
-        )
+        result = generate_testbench_for(req.module_code)
 
         return {
             "success": True,

@@ -269,3 +269,177 @@ REPAIR_KEYS_BOTH = (
 REPAIR_KEYS_TESTBENCH_ONLY = (
     '{"testbench_code": "...", "changes_made": "one sentence"}'
 )
+
+
+# ===========================================================================
+# Template pipeline prompts
+#
+# The design and the reference model are written in SEPARATE requests. The
+# reference model only sees the specification and the port list (never the
+# design's code) in the generate flow, so a mistake in one is caught by the
+# other instead of being copied into both.
+# ===========================================================================
+
+COMMON_CONVENTIONS = """
+CONVENTIONS (follow these unless the description says otherwise):
+- N-to-2^N decoder: input [N-1:0] a (plus en when an enable is requested),
+  output [2^N-1:0] y, one-hot: y = en ? (1 << a) : 0. A 2-to-4 decoder has
+  a 4-bit output.
+- Priority encoder: the highest set input bit wins; add an output valid
+  that is 1 when any input bit is set.
+- Multiplexer: select input sel; y equals the selected data input.
+- Shift register: shifts LEFT on every clock; the serial input enters bit 0:
+  q <= {q[N-2:0], serial_in}.
+- Counter: counts up by 1 and wraps around.
+- Comparator (unsigned): gt = (a > b), eq = (a == b), lt = (a < b).
+- Even parity generator: parity = ^data (XOR of all data bits).
+- Resets are synchronous unless the description says asynchronous.
+"""
+
+
+DESIGN_ONLY_PROMPT = """
+You are an expert Verilog RTL designer. Write ONE synthesizable Verilog-2001
+module that implements the circuit described below. Do not write a testbench.
+
+Return ONLY a JSON object with exactly these string keys:
+{"module_code": "...", "explanation": "..."}
+
+- module_code: the complete module (module ... endmodule), nothing else.
+- explanation: one or two sentences on how the circuit works.
+- No Markdown fences. Escape newlines as \\n and quotes as \\" inside JSON.
+""" + DESIGN_RULES + """
+- Name a clock input clk. Name a reset rst (active-high) or rst_n
+  (active-low). Add a clock or reset only if the circuit needs one.
+- No initial blocks, $display, $finish or delays (#) in the design.
+""" + COMMON_CONVENTIONS + """
+CIRCUIT DESCRIPTION:
+{input}
+"""
+
+
+REFERENCE_MODEL_COMBINATIONAL = """
+You are a verification engineer. A testbench for a COMBINATIONAL circuit is
+already written. For every input vector it sets the inputs, waits, runs YOUR
+statements, then checks each output against expected_<output>.
+
+Write Verilog statements that set expected_<output> for EVERY output, computed
+from the input values exactly as the specification requires.
+
+SPECIFICATION:
+{spec}
+
+PORTS:
+{ports}
+
+You can read: {readable}
+You must assign: {assignable}
+
+RULES:
+- Plain procedural statements with blocking "=": assignments, if/else,
+  case, for loops, operators, concatenation, indexing.
+- Never read the DUT outputs ({outputs}). Compute everything from inputs.
+- No module, initial, always, assign, #delays, @events, $display.
+- Helper variables must be declared in "declarations" (reg/integer only).
+- Make widths explicit: a sum with a carry needs a concatenation such as
+  {expected_cout, expected_sum} = a + b + cin;
+
+""" + COMMON_CONVENTIONS + """
+EXAMPLE (full adder with inputs a, b, cin and outputs sum, cout):
+{"expected_logic": "{expected_cout, expected_sum} = a + b + cin;",
+ "reset_logic": "", "declarations": "", "explanation": "sum and carry of a+b+cin"}
+
+Return ONLY a JSON object with exactly these string keys:
+{"expected_logic": "...", "reset_logic": "", "declarations": "...", "explanation": "..."}
+No Markdown fences. Escape newlines as \\n inside JSON strings.
+"""
+
+
+REFERENCE_MODEL_SEQUENTIAL = """
+You are a verification engineer. A testbench for a CLOCKED circuit is already
+written. It holds reset for two clock edges, releases it, runs your
+reset_logic, then repeats for many cycles:
+  1. checks every output against expected_<output>,
+  2. drives new random values on the data inputs,
+  3. runs your expected_logic,
+  4. applies one rising clock edge.
+
+Write:
+- reset_logic: statements that set every expected_<output> to its value
+  right after reset (and initialise any helper state).
+- expected_logic: statements that update expected_<output> to the values the
+  outputs will have AFTER the next rising edge, given the current inputs and
+  the current expected_* / helper values (the state before the edge).
+
+SPECIFICATION:
+{spec}
+
+PORTS:
+{ports}
+
+You can read: {readable}
+You must assign: {assignable}
+
+RULES:
+- Plain procedural statements with blocking "=": assignments, if/else,
+  case, operators, concatenation, indexing.
+- Never read the DUT outputs ({outputs}). Track state in expected_* or in
+  helper variables declared in "declarations" (reg/integer only).
+- No module, initial, always, assign, #delays, @events, $display.
+- Model THIS circuit: a counter adds 1, a D flip-flop copies d, a shift
+  register shifts, an FSM updates a state variable, etc.
+
+""" + COMMON_CONVENTIONS + """
+EXAMPLES:
+4-bit counter (count[3:0]) with enable en:
+{"reset_logic": "expected_count = 4'd0;",
+ "expected_logic": "if (en) expected_count = expected_count + 4'd1;",
+ "declarations": "", "explanation": "counts up while en is high"}
+D flip-flop (d -> q):
+{"reset_logic": "expected_q = 1'b0;", "expected_logic": "expected_q = d;",
+ "declarations": "", "explanation": "q follows d after each edge"}
+
+Return ONLY a JSON object with exactly these string keys:
+{"expected_logic": "...", "reset_logic": "...", "declarations": "...", "explanation": "..."}
+No Markdown fences. Escape newlines as \\n inside JSON strings.
+"""
+
+
+REFERENCE_MODEL_REPAIR = """
+Your previous reference-model statements for this testbench have problems.
+
+PROBLEMS:
+{problems}
+
+PREVIOUS ANSWER:
+expected_logic:
+{expected_logic}
+reset_logic:
+{reset_logic}
+declarations:
+{declarations}
+
+Fix the problems and return the complete corrected answer in the same JSON
+format: {"expected_logic": "...", "reset_logic": "...", "declarations": "...", "explanation": "..."}
+Follow all the rules from the original request below.
+
+ORIGINAL REQUEST:
+{original}
+"""
+
+
+DESIGN_REPAIR_PROMPT = """
+The Verilog module below does not compile with Icarus Verilog
+(Verilog-2005 rules) or has structural problems.
+
+PROBLEMS:
+{problems}
+
+MODULE:
+{module_code}
+
+Fix only what is needed. Keep the module name, ports and intended behaviour.
+Outputs driven by assign are wire; outputs assigned in always blocks are reg.
+
+Return ONLY a JSON object: {"module_code": "...", "explanation": "..."}
+No Markdown fences. Escape newlines as \\n and quotes as \\" inside JSON.
+"""

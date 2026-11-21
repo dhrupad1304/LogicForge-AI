@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
 import { API } from "../utils/api";
 
@@ -37,8 +37,12 @@ type Verification = {
   total_tests?: number | null;
   failures?: number | null;
   repair_attempts: number;
+  attempts?: number;
   problems?: string | null;
   log?: string[];
+  method?: "template" | "free-form";
+  independent?: boolean;
+  model?: string;
 };
 
 // True only when the text contains a complete Verilog module.
@@ -55,21 +59,38 @@ const isVerilogSource = (code?: string | null): boolean => {
 
 const describeVerification = (v?: Verification | null): string => {
   if (!v) return "";
-  const repairs =
-    v.repair_attempts > 0
-      ? ` after ${v.repair_attempts} automatic repair${v.repair_attempts === 1 ? "" : "s"}`
+  const tries =
+    v.attempts && v.attempts > 1
+      ? ` after ${v.attempts} attempts`
+      : v.repair_attempts > 0
+        ? ` after ${v.repair_attempts} automatic repair${v.repair_attempts === 1 ? "" : "s"}`
+        : "";
+  const how =
+    v.method === "template"
+      ? v.independent
+        ? "Testbench built from the design's ports; expected values were written separately from the design, so PASS means two independent versions agree."
+        : "Testbench built from the design's ports; expected values were derived from your design."
       : "";
   if (v.ready) {
     const result =
       v.verdict === "PASS"
         ? `all ${v.total_tests} tests passed`
         : `${v.failures} of ${v.total_tests} tests failed`;
-    return `Compiled with Icarus Verilog${repairs}. Pre-check: ${result}. Run Simulation to see full output and waveform.`;
+    const lines = [
+      `Compiled with Icarus Verilog${tries}. Pre-check: ${result}.`,
+      how,
+      v.verdict === "FAIL"
+        ? "The FAIL lines show the inputs where the design and the expected values differ; check them against what you asked for."
+        : "",
+      "Run Simulation to see the full output and waveform.",
+    ];
+    if (v.verdict === "FAIL" && v.log?.length) lines.push("", "Log:", ...v.log);
+    return lines.filter((line, index) => line || index > 3).join("\n");
   }
   return [
-    `Code still has problems${repairs}${v.compiled ? " (it compiles)" : " (it does not compile)"}:`,
+    `Code still has problems${tries}${v.compiled ? " (it compiles)" : " (it does not compile)"}:`,
     v.problems || "",
-    ...(v.log && v.log.length ? ["", "Repair log:", ...v.log] : []),
+    ...(v.log && v.log.length ? ["", "Log:", ...v.log] : []),
   ].join("\n");
 };
 
@@ -84,27 +105,49 @@ function configureMonaco(monaco: any) {
     base: "vs-dark",
     inherit: true,
     rules: [
-      { token: "comment", foreground: "71877A", fontStyle: "italic" },
-      { token: "keyword", foreground: "55E69A" },
-      { token: "number", foreground: "B7E6A5" },
-      { token: "string", foreground: "A5D6A7" },
-      { token: "identifier", foreground: "E0EAE3" },
+      { token: "comment", foreground: "6C6C75", fontStyle: "italic" },
+      { token: "keyword", foreground: "F0A43A" },
+      { token: "number", foreground: "8AB4E8" },
+      { token: "string", foreground: "9CC79B" },
+      { token: "identifier", foreground: "E4E4E7" },
+      { token: "delimiter", foreground: "A0A0A8" },
     ],
     colors: {
-      "editor.background": "#0B100E",
-      "editor.foreground": "#E7EEE9",
-      "editorLineNumber.foreground": "#53645A",
-      "editorLineNumber.activeForeground": "#55E69A",
-      "editorCursor.foreground": "#55E69A",
-      "editor.selectionBackground": "#24563B",
-      "editor.lineHighlightBackground": "#121B16",
-      "editorIndentGuide.background": "#26352D",
-      "editorIndentGuide.activeBackground": "#477A59",
-      "editorWidget.background": "#101713",
-      "editorWidget.border": "#365B43",
+      "editor.background": "#0E0E10",
+      "editor.foreground": "#ECECEE",
+      "editorLineNumber.foreground": "#45454C",
+      "editorLineNumber.activeForeground": "#A0A0A8",
+      "editorCursor.foreground": "#F0A43A",
+      "editor.selectionBackground": "#2C2C33",
+      "editor.inactiveSelectionBackground": "#222227",
+      "editor.lineHighlightBackground": "#141417",
+      "editor.lineHighlightBorder": "#00000000",
+      "editorIndentGuide.background1": "#1F1F23",
+      "editorIndentGuide.activeBackground1": "#303036",
+      "editorWidget.background": "#161619",
+      "editorWidget.border": "#303036",
+      "editorGutter.background": "#0E0E10",
+      "scrollbarSlider.background": "#30303680",
+      "scrollbarSlider.hoverBackground": "#3A3A42",
     },
   });
 }
+
+const EDITOR_OPTIONS = {
+  minimap: { enabled: false },
+  fontSize: 13,
+  lineHeight: 21,
+  fontFamily: "'SF Mono', ui-monospace, Menlo, Consolas, monospace",
+  automaticLayout: true,
+  scrollBeyondLastLine: false,
+  padding: { top: 12, bottom: 12 },
+  renderLineHighlight: "line" as const,
+  overviewRulerLanes: 0,
+  hideCursorInOverviewRuler: true,
+  scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+  cursorBlinking: "smooth" as const,
+  smoothScrolling: true,
+};
 
 function parseVCD(vcd: string): {
   variables: VCDVariable[];
@@ -196,9 +239,22 @@ function parseVCD(vcd: string): {
 }
 
 function WaveformViewer({ vcd }: { vcd: string }) {
+  // zoom 1 = the whole simulation fits the panel width.
   const [zoom, setZoom] = useState(1);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [viewportWidth, setViewportWidth] = useState(0);
   const parsed = useMemo(() => parseVCD(vcd), [vcd]);
+
+  // Track the scroll area's width so zoom 1 always fits the panel.
+  const observer = useRef<ResizeObserver | null>(null);
+  const measureViewport = useCallback((node: HTMLDivElement | null) => {
+    observer.current?.disconnect();
+    if (!node) return;
+    observer.current = new ResizeObserver(([entry]) =>
+      setViewportWidth(entry.contentRect.width)
+    );
+    observer.current.observe(node);
+  }, []);
 
   const signals = parsed.signals.filter(
     (signal, index, all) =>
@@ -240,19 +296,28 @@ function WaveformViewer({ vcd }: { vcd: string }) {
 
   if (!vcd.trim() || signals.length === 0) {
     return (
-      <div className="rounded-xl border border-[#26352D] bg-[#101713] p-6 text-sm text-[#91A198]">
+      <div className="rounded-lg border border-line bg-surface p-6 text-sm text-fg-muted">
         No waveform signals were found in the VCD file.
       </div>
     );
   }
 
   const duration = Math.max(parsed.duration, 1);
-  const rowHeight = 58;
-  const leftWidth = 190;
-  const plotWidth = Math.min(12000, Math.max(650, duration * 28 * zoom));
+  const rowHeight = 52;
+  const leftWidth = viewportWidth > 0 && viewportWidth < 640 ? 112 : 176;
+  const fitWidth = Math.max(240, (viewportWidth || 900) - leftWidth - 1);
+  const plotWidth = Math.min(60000, fitWidth * zoom);
   const totalHeight = displayedSignals.length * rowHeight + 35;
   const scale = plotWidth / duration;
-  const ticks = Array.from({ length: 6 }, (_, index) => (duration * index) / 5);
+
+  // A "nice" tick step (1, 2 or 5 x 10^n) that keeps labels ~100px apart.
+  const rawStep = duration / Math.max(1, plotWidth / 100);
+  const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+  const tickStep =
+    [1, 2, 5, 10].map((m) => m * magnitude).find((step) => step >= rawStep) ||
+    rawStep;
+  const ticks: number[] = [];
+  for (let t = 0; t <= duration + 1e-9; t += tickStep) ticks.push(t);
 
   const getY = (value: string) => {
     const binary = value.toLowerCase();
@@ -292,45 +357,47 @@ function WaveformViewer({ vcd }: { vcd: string }) {
     }).filter((segment) => segment.end > segment.start);
 
   return (
-    <div className="overflow-hidden rounded-2xl border border-[#263D30] bg-[#0D130F] shadow-[0_12px_50px_rgba(0,0,0,0.25)]">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#26352D] bg-[#111A14] px-5 py-4">
+    <div className="overflow-hidden rounded-lg border border-line bg-surface">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="h-2 w-2 rounded-full bg-[#39E58C] shadow-[0_0_10px_#39E58C]" />
-            <h3 className="font-semibold text-[#E7EEE9]">Digital Waveform</h3>
-          </div>
-          <p className="mt-1 text-xs text-[#91A198]">
+          <h3 className="text-sm font-medium text-fg">Waveform</h3>
+          <p className="mt-0.5 font-mono text-[11px] text-fg-subtle">
             Duration: {parsed.duration} {parsed.timescale}
             {" · "}Showing {displayedSignals.length} of {signals.length} signals
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1 rounded-md border border-line bg-surface-2 p-0.5">
           <button
-            onClick={() => setZoom((value) => Math.max(0.25, value / 1.5))}
-            className="rounded-lg border border-[#365B43] bg-[#17231B] px-3 py-1.5 text-sm text-[#B7C9BD] hover:border-[#39E58C] hover:text-[#39E58C]"
+            aria-label="Zoom out"
+            disabled={zoom <= 1}
+            onClick={() => setZoom((value) => Math.max(1, value / 2))}
+            className="h-6 min-w-6 rounded px-1.5 text-xs text-fg-muted hover:bg-surface-3 hover:text-fg disabled:opacity-35 disabled:hover:bg-transparent"
           >
             −
           </button>
-          <span className="min-w-14 text-center text-xs text-[#91A198]">
-            {zoom.toFixed(2)}x
+          <span className="min-w-10 text-center font-mono text-[11px] text-fg-muted">
+            {zoom === 1 ? "fit" : `${zoom}×`}
           </span>
           <button
-            onClick={() => setZoom((value) => Math.min(8, value * 1.5))}
-            className="rounded-lg border border-[#365B43] bg-[#17231B] px-3 py-1.5 text-sm text-[#B7C9BD] hover:border-[#39E58C] hover:text-[#39E58C]"
+            aria-label="Zoom in"
+            disabled={zoom >= 64}
+            onClick={() => setZoom((value) => Math.min(64, value * 2))}
+            className="h-6 min-w-6 rounded px-1.5 text-xs text-fg-muted hover:bg-surface-3 hover:text-fg disabled:opacity-35 disabled:hover:bg-transparent"
           >
             +
           </button>
           <button
             onClick={() => setZoom(1)}
-            className="rounded-lg border border-[#365B43] bg-[#17231B] px-3 py-1.5 text-sm text-[#B7C9BD] hover:border-[#39E58C] hover:text-[#39E58C]"
+            disabled={zoom === 1}
+            className="h-6 min-w-6 rounded px-1.5 text-xs text-fg-muted hover:bg-surface-3 hover:text-fg disabled:opacity-35 disabled:hover:bg-transparent"
           >
-            Reset
+            Fit
           </button>
         </div>
       </div>
 
-      <div className="overflow-auto">
+      <div ref={measureViewport} className="overflow-auto">
         <div
           style={{
             width: leftWidth + plotWidth,
@@ -338,22 +405,22 @@ function WaveformViewer({ vcd }: { vcd: string }) {
             minHeight: totalHeight,
           }}
         >
-          <div className="flex border-b border-[#26352D] bg-[#141D17]">
+          <div className="flex border-b border-line bg-surface-2">
             <div
-              className="shrink-0 border-r border-[#26352D] px-3 py-3 text-xs font-bold tracking-wider text-[#91A198]"
+              className="shrink-0 border-r border-line px-3 py-2.5 font-mono text-[11px] uppercase tracking-wider text-fg-subtle"
               style={{ width: leftWidth }}
             >
-              SIGNAL
+              Signal
             </div>
             <div className="relative h-10" style={{ width: plotWidth }}>
               {ticks.map((tick, index) => (
                 <div
                   key={index}
-                  className="absolute top-0 h-full border-l border-[#314437]"
+                  className="absolute top-0 h-full border-l border-line-strong"
                   style={{ left: tick * scale }}
                 >
-                  <span className="ml-1 text-[10px] text-[#91A198]">
-                    {Math.round(tick)}
+                  <span className="ml-1 font-mono text-[10px] text-fg-subtle">
+                    {Number(tick.toFixed(3))}
                   </span>
                 </div>
               ))}
@@ -363,18 +430,18 @@ function WaveformViewer({ vcd }: { vcd: string }) {
           {displayedSignals.map((signal, index) => (
             <div
               key={`${signal.variable.fullName}-${index}`}
-              className="flex border-b border-[#202D25] hover:bg-[#111B14]"
+              className="flex border-b border-line/70 hover:bg-surface-2"
               style={{ height: rowHeight }}
             >
               <div
-                className="flex shrink-0 items-center overflow-hidden border-r border-[#26352D] bg-[#111813] px-3"
+                className="flex shrink-0 items-center overflow-hidden border-r border-line px-3"
                 style={{ width: leftWidth }}
               >
                 <div className="min-w-0">
-                  <div className="truncate text-xs font-semibold text-[#62ECA0]">
+                  <div className="truncate font-mono text-xs text-fg">
                     {signal.variable.name}
                   </div>
-                  <div className="truncate text-[10px] text-[#71877A]">
+                  <div className="truncate font-mono text-[10px] text-fg-subtle">
                     {signal.variable.width}-bit
                     {showAdvanced && signal.variable.fullName.includes(".")
                       ? ` · ${signal.variable.fullName}`
@@ -390,8 +457,8 @@ function WaveformViewer({ vcd }: { vcd: string }) {
                     x2={tick * scale}
                     y1="0"
                     y2={rowHeight}
-                    stroke="#26352D"
-                    strokeDasharray="3 4"
+                    stroke="#232328"
+                    strokeDasharray="2 4"
                   />
                 ))}
                 <line
@@ -399,7 +466,7 @@ function WaveformViewer({ vcd }: { vcd: string }) {
                   x2={plotWidth}
                   y1={rowHeight / 2}
                   y2={rowHeight / 2}
-                  stroke="#1C2920"
+                  stroke="#18181B"
                 />
                 {signal.variable.width > 1 ? (
                   getBusSegments(signal).map((segment, segmentIndex) => {
@@ -409,9 +476,9 @@ function WaveformViewer({ vcd }: { vcd: string }) {
                       <g key={segmentIndex}>
                         <polygon
                           points={`${segment.start},26 ${segment.start + slant},13 ${segment.end - slant},13 ${segment.end},26 ${segment.end - slant},39 ${segment.start + slant},39`}
-                          fill={unknown ? "rgba(248,113,113,0.12)" : "rgba(57,229,140,0.10)"}
-                          stroke={unknown ? "#F87171" : "#39E58C"}
-                          strokeWidth="1.5"
+                          fill={unknown ? "rgba(239,95,95,0.10)" : "rgba(240,164,58,0.10)"}
+                          stroke={unknown ? "#EF5F5F" : "#F0A43A"}
+                          strokeWidth="1.25"
                         />
                         {segment.end - segment.start > 28 && (
                           <text
@@ -419,7 +486,8 @@ function WaveformViewer({ vcd }: { vcd: string }) {
                             y={30}
                             textAnchor="middle"
                             fontSize="10"
-                            fill="#D5DED8"
+                            fontFamily="ui-monospace, Menlo, monospace"
+                            fill="#ECECEE"
                           >
                             {formatBusValue(segment.value)}
                           </text>
@@ -432,20 +500,11 @@ function WaveformViewer({ vcd }: { vcd: string }) {
                     <path
                       d={getPath(signal)}
                       fill="none"
-                      stroke="#39E58C"
-                      strokeWidth="2"
+                      stroke="#F0A43A"
+                      strokeWidth="1.5"
                       strokeLinejoin="round"
                       strokeLinecap="round"
                     />
-                    {signal.events.map((event, eventIndex) => (
-                      <circle
-                        key={eventIndex}
-                        cx={event.time * scale}
-                        cy={getY(event.value)}
-                        r="2.5"
-                        fill="#A1FFC9"
-                      />
-                    ))}
                   </>
                 )}
               </svg>
@@ -454,30 +513,129 @@ function WaveformViewer({ vcd }: { vcd: string }) {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#26352D] bg-[#111813] px-5 py-3">
-        <div className="flex flex-wrap gap-4 text-xs text-[#91A198]">
-          <span>
-            <span className="mr-1 inline-block h-2 w-2 rounded-full bg-[#39E58C]" />
-            Signal transition
-          </span>
-          <span>High = 1</span>
-          <span>Low = 0</span>
-          <span>X/Z = Unknown</span>
-          <span>Buses shown in hex</span>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-line px-4 py-2.5">
+        <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[11px] text-fg-subtle">
+          <span>high = 1</span>
+          <span>low = 0</span>
+          <span><span className="text-fail">red</span> = X/Z</span>
+          <span>buses in hex</span>
         </div>
         {advancedSignals.length > 0 && (
           <button
             onClick={() => setShowAdvanced((value) => !value)}
-            className="rounded-lg border border-[#365B43] bg-[#17231B] px-3 py-2 text-xs font-semibold text-[#62ECA0] hover:border-[#39E58C] hover:bg-[#1D3023]"
+            className="rounded-md px-2 py-1 text-xs text-fg-muted hover:bg-surface-3 hover:text-fg"
           >
             {showAdvanced
-              ? "Hide Advanced Signals"
-              : `Show Advanced Signals (${advancedSignals.length})`}
+              ? "Hide internal signals"
+              : `Show internal signals (${advancedSignals.length})`}
           </button>
         )}
       </div>
     </div>
   );
+}
+
+// Small line icons (24px grid, 1.75 stroke). Kept inline so the UI has
+// no icon-font or emoji dependency.
+const ICON_PATHS: Record<string, string> = {
+  folder: "M3 7.5A1.5 1.5 0 0 1 4.5 6h4l2 2h9A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z",
+  file: "M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5",
+  refresh: "M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7",
+  plus: "M12 5v14M5 12h14",
+  pencil: "M4 20h4L19 9l-4-4L4 16zM13.5 6.5l4 4",
+  x: "M6 6l12 12M18 6L6 18",
+  up: "M12 19V5M5 12l7-7 7 7",
+  play: "M7 5v14l11-7z",
+  wrench: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z",
+  beaker: "M9 3h6M10 3v6L4.5 18.5A1.7 1.7 0 0 0 6 21h12a1.7 1.7 0 0 0 1.5-2.5L14 9V3M7.5 15h9",
+  check: "M5 12.5l4.5 4.5L19 7.5",
+  arrow: "M5 12h14M13 6l6 6-6 6",
+  save: "M5 3h11l3 3v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2zM8 3v5h7M8 21v-7h8v7",
+};
+
+function Icon({ name, className = "h-4 w-4" }: { name: string; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={`shrink-0 ${className}`}
+      aria-hidden="true"
+    >
+      <path d={ICON_PATHS[name]} />
+    </svg>
+  );
+}
+
+// Brand mark: a square-wave step inside a rounded square.
+function LogoMark() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-6 w-6" aria-hidden="true">
+      <rect x="1" y="1" width="22" height="22" rx="5" fill="#F0A43A" />
+      <path
+        d="M5 15h4V9h5v6h5"
+        fill="none"
+        stroke="#1B1206"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function PanelHeader({
+  title,
+  meta,
+  children,
+}: {
+  title: ReactNode;
+  meta?: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-11 flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2">
+      <div className="flex min-w-0 items-baseline gap-2">
+        <h2 className="truncate text-[13px] font-medium text-fg">{title}</h2>
+        {meta && <span className="truncate font-mono text-[11px] text-fg-subtle">{meta}</span>}
+      </div>
+      {children && <div className="flex items-center gap-1">{children}</div>}
+    </div>
+  );
+}
+
+const EXAMPLE_PROMPTS = [
+  "Full adder",
+  "4-to-1 multiplexer with a 2-bit select",
+  "4-bit up counter with synchronous reset",
+  "8-bit even parity generator",
+  "2-to-4 decoder with enable",
+];
+
+// Shown over an empty editor; pointer-events-none so typing still works.
+function EditorHint({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center p-6">
+      <div className="max-w-xs text-center">
+        <p className="text-[13px] font-medium text-fg-muted">{title}</p>
+        <p className="mt-1 text-xs leading-5 text-fg-subtle">{body}</p>
+      </div>
+    </div>
+  );
+}
+
+// Colour simulation output by line: PASS green, FAIL / errors red,
+// the summary line bright, everything else muted.
+function OutputLine({ line }: { line: string }) {
+  let tone = "text-fg-muted";
+  if (/^\s*(OVERALL\s+)?PASS\b/.test(line)) tone = "text-pass";
+  else if (/^\s*(OVERALL\s+)?FAIL(ED)?\b/.test(line) || /\berror\b/i.test(line)) tone = "text-fail";
+  else if (/^\s*Total tests/i.test(line)) tone = "text-fg";
+  else if (/^\s*VCD info|\$finish called/.test(line)) tone = "text-fg-subtle";
+  return <div className={tone}>{line || " "}</div>;
 }
 
 export default function Home() {
@@ -491,6 +649,7 @@ export default function Home() {
   const [simulating, setSimulating] = useState(false);
   const [simulationSuccess, setSimulationSuccess] = useState<boolean | null>(null);
   const [simulationVerdict, setSimulationVerdict] = useState<string | null>(null);
+  const [modelLabel, setModelLabel] = useState("");
   const [simulationTests, setSimulationTests] = useState<number | null>(null);
   // Raw output and error of the last simulation, sent to the AI debugger.
   const [lastSimulation, setLastSimulation] = useState<{
@@ -549,6 +708,9 @@ export default function Home() {
 
   useEffect(() => {
     void loadProjectFiles("");
+    API.get("/model")
+      .then((response) => setModelLabel(response.data?.label || ""))
+      .catch(() => setModelLabel(""));
     // Load the workspace root once on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -908,102 +1070,136 @@ export default function Home() {
     );
   };
 
-  const panelClass =
-    "overflow-hidden rounded-2xl border border-[#263D30] bg-[#101713] shadow-[0_8px_30px_rgba(0,0,0,0.20)]";
-  const buttonClass =
-    "rounded-xl bg-[#39E58C] px-5 py-3 text-sm font-bold text-[#07110B] shadow-[0_0_18px_rgba(57,229,140,0.12)] transition hover:bg-[#65F5A7] hover:shadow-[0_0_24px_rgba(57,229,140,0.22)] disabled:cursor-not-allowed disabled:opacity-50";
+  const btnPrimary =
+    "inline-flex h-9 items-center justify-center gap-2 rounded-md bg-accent px-3.5 text-[13px] font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50 disabled:hover:bg-accent";
+  const btnSecondary =
+    "inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line-strong bg-surface-2 px-3.5 text-[13px] font-medium text-fg hover:border-fg-subtle/60 hover:bg-surface-3 disabled:opacity-50";
+  const btnGhost =
+    "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-fg-muted hover:bg-surface-3 hover:text-fg disabled:opacity-40 disabled:hover:bg-transparent";
+  const panel = "overflow-hidden rounded-lg border border-line bg-surface";
+
+  const activity = loading
+    ? "Generating design"
+    : generatingTestbench
+      ? "Writing testbench"
+      : simulating
+        ? "Simulating"
+        : debugging
+          ? "Debugging"
+          : "";
+
+  const fileLabel = (file: string, fallback: string) =>
+    file ? file.split("/").pop() || file : fallback;
+
+  const verdictBadge =
+    simulationSuccess === null
+      ? null
+      : simulationSuccess
+        ? simulationVerdict === "UNVERIFIED"
+          ? { tone: "border-line-strong text-fg-muted", text: "Ran · no summary" }
+          : {
+              tone: "border-pass/30 bg-pass-soft text-pass",
+              text: `Pass${simulationTests != null ? ` · ${simulationTests} tests` : ""}`,
+            }
+        : { tone: "border-fail/30 bg-fail-soft text-fail", text: "Fail" };
 
   return (
-    <main className="min-h-screen bg-[#080B0A] px-4 py-8 text-[#E7EEE9] md:px-8">
-      <div className="mx-auto max-w-[1600px]">
-        <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <div className="mb-2 flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-[#365B43] bg-[#14251A] text-lg font-bold text-[#55E69A] shadow-[0_0_20px_rgba(57,229,140,0.10)]">
-                {"</>"}
-              </div>
-              <div>
-                <h1 className="text-3xl font-extrabold tracking-tight text-white">
-                  LogicForge <span className="text-[#39E58C]">AI</span>
-                </h1>
-                <p className="text-[10px] font-semibold uppercase tracking-[0.25em] text-[#71877A]">
-                  Digital Design Studio
-                </p>
-              </div>
+    <main className="min-h-screen bg-bg text-fg">
+      <header className="sticky top-0 z-20 border-b border-line bg-bg/85 backdrop-blur-md">
+        <div className="mx-auto flex h-12 max-w-[1600px] items-center justify-between gap-4 px-4 md:px-6">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <LogoMark />
+            <span className="text-[15px] font-semibold tracking-tight">LogicForge</span>
+            <span className="hidden h-4 w-px bg-line-strong sm:block" />
+            <span className="hidden truncate text-[13px] text-fg-subtle sm:block">
+              Verilog workbench
+            </span>
+          </div>
+          <div className="flex items-center gap-2 font-mono text-[11px] text-fg-subtle">
+            {activity ? (
+              <>
+                <span className="lf-spinner text-accent" />
+                <span className="text-fg-muted">{activity}…</span>
+              </>
+            ) : (
+              <>
+                <span className="h-1.5 w-1.5 rounded-full bg-fg-subtle" />
+                <span>Ready{modelLabel ? ` · ${modelLabel}` : ""}</span>
+              </>
+            )}
+          </div>
+        </div>
+      </header>
+
+      <div className="mx-auto grid max-w-[1600px] grid-cols-1 items-start gap-5 px-4 py-5 md:px-6 lg:grid-cols-[248px_minmax(0,1fr)]">
+        {/* ---------------- Explorer ---------------- */}
+        <aside className="min-w-0 lg:sticky lg:top-[68px]">
+          <section className={panel}>
+            <PanelHeader title="Files">
+              <button
+                onClick={() => void createProjectItem("file")}
+                className={btnGhost}
+                title="New file"
+                aria-label="New file"
+              >
+                <Icon name="plus" className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => void createProjectItem("folder")}
+                className={btnGhost}
+                title="New folder"
+                aria-label="New folder"
+              >
+                <Icon name="folder" className="h-3.5 w-3.5" />
+              </button>
+              <button
+                onClick={() => void loadProjectFiles()}
+                disabled={projectLoading}
+                className={btnGhost}
+                title="Refresh"
+                aria-label="Refresh"
+              >
+                <Icon
+                  name="refresh"
+                  className={`h-3.5 w-3.5 ${projectLoading ? "animate-spin" : ""}`}
+                />
+              </button>
+            </PanelHeader>
+
+            <div className="flex h-8 items-center justify-between gap-2 border-b border-line px-3">
+              <span className="min-w-0 truncate font-mono text-[11px] text-fg-subtle">
+                ~/workspace{currentFolder ? `/${currentFolder}` : ""}
+              </span>
+              {currentFolder && (
+                <button
+                  onClick={() => {
+                    const parent = currentFolder.includes("/")
+                      ? currentFolder.slice(0, currentFolder.lastIndexOf("/"))
+                      : "";
+                    void loadProjectFiles(parent);
+                  }}
+                  className="inline-flex items-center gap-1 text-[11px] text-fg-muted hover:text-fg"
+                >
+                  <Icon name="up" className="h-3 w-3" />
+                  Up
+                </button>
+              )}
             </div>
-            <p className="mt-3 text-sm text-[#91A198]">
-              AI-powered Verilog generation, simulation and waveform analysis.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 rounded-full border border-[#294432] bg-[#111A14] px-3 py-2 text-xs text-[#91A198]">
-            <span className="h-2 w-2 rounded-full bg-[#39E58C] shadow-[0_0_8px_#39E58C]" />
-            Digital Logic Workspace
-          </div>
-        </header>
 
-        <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[280px_minmax(0,1fr)]">
-          <aside className="min-w-0 lg:sticky lg:top-6">
-            <section className={`${panelClass} p-4`}>
-              <div className="mb-4 flex items-center justify-between">
-                <h2 className="text-lg font-bold text-white">
-                  <span className="text-[#39E58C]">▣</span> Explorer
-                </h2>
-                <button
-                  onClick={() => void loadProjectFiles()}
-                  disabled={projectLoading}
-                  className="text-xs text-[#62ECA0] hover:text-white disabled:opacity-50"
-                >
-                  {projectLoading ? "Loading..." : "↻ Refresh"}
-                </button>
-              </div>
-
-              <div className="mb-3 grid grid-cols-2 gap-2">
-                <button
-                  onClick={() => void createProjectItem("file")}
-                  className="rounded-lg border border-[#365B43] bg-[#17251B] px-2 py-2 text-xs font-semibold text-[#62ECA0] hover:border-[#39E58C]"
-                >
-                  + New File
-                </button>
-                <button
-                  onClick={() => void createProjectItem("folder")}
-                  className="rounded-lg border border-[#365B43] bg-[#17251B] px-2 py-2 text-xs font-semibold text-[#62ECA0] hover:border-[#39E58C]"
-                >
-                  + Folder
-                </button>
-              </div>
-
-              <div className="mb-3 flex items-center justify-between gap-2 rounded-lg bg-[#0B120D] px-3 py-2">
-                <span className="min-w-0 truncate text-xs text-[#91A198]">
-                  {currentFolder ? `/${currentFolder}` : "/ workspace"}
-                </span>
-                {currentFolder && (
-                  <button
-                    onClick={() => {
-                      const parent = currentFolder.includes("/")
-                        ? currentFolder.slice(0, currentFolder.lastIndexOf("/"))
-                        : "";
-                      void loadProjectFiles(parent);
-                    }}
-                    className="shrink-0 text-xs text-[#62ECA0] hover:text-white"
-                  >
-                    ↑ Up
-                  </button>
-                )}
-              </div>
-
-              <div className="max-h-[55vh] space-y-1 overflow-y-auto">
-                {projectFiles.length === 0 && !projectLoading && (
-                  <p className="px-2 py-4 text-center text-xs text-[#71877A]">
-                    This folder is empty.
-                  </p>
-                )}
-                {projectFiles.map((item) => (
-                  <div
+            <ul className="max-h-[50vh] overflow-y-auto p-1.5">
+              {projectFiles.length === 0 && !projectLoading && (
+                <li className="px-2 py-6 text-center text-xs text-fg-subtle">
+                  Empty folder
+                </li>
+              )}
+              {projectFiles.map((item) => {
+                const active =
+                  moduleFile === item.path || testbenchFile === item.path;
+                return (
+                  <li
                     key={item.path}
-                    className={`group flex items-center gap-1 rounded-lg px-2 py-2 ${
-                      moduleFile === item.path || testbenchFile === item.path
-                        ? "bg-[#1A3022] text-[#62ECA0]"
-                        : "text-[#B7C9BD] hover:bg-[#17231B]"
+                    className={`group flex items-center gap-1 rounded-md pr-1 ${
+                      active ? "bg-surface-3 text-fg" : "text-fg-muted hover:bg-surface-2 hover:text-fg"
                     }`}
                   >
                     <button
@@ -1012,381 +1208,362 @@ export default function Home() {
                           ? void loadProjectFiles(item.path)
                           : void openProjectFile(item.path)
                       }
-                      className="flex min-w-0 flex-1 items-center gap-2 text-left text-xs"
+                      className="flex h-8 min-w-0 flex-1 items-center gap-2 px-2 text-left text-[13px]"
                       title={item.path}
                     >
-                      <span className="shrink-0">
-                        {item.type === "folder" ? "📁" : "📄"}
-                      </span>
+                      <Icon
+                        name={item.type === "folder" ? "folder" : "file"}
+                        className={`h-3.5 w-3.5 ${active ? "text-accent" : "text-fg-subtle"}`}
+                      />
                       <span className="truncate">{item.name}</span>
                     </button>
-                    <button
-                      onClick={() => void renameProjectItem(item.path)}
-                      title="Rename"
-                      className="px-1 text-[10px] text-[#71877A] hover:text-[#62ECA0]"
-                    >
-                      ✎
-                    </button>
-                    <button
-                      onClick={() => void deleteProjectItem(item.path)}
-                      title="Delete"
-                      className="px-1 text-[10px] text-[#71877A] hover:text-red-400"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
+                    <span className="flex items-center opacity-100 group-focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100">
+                      <button
+                        onClick={() => void renameProjectItem(item.path)}
+                        title="Rename"
+                        aria-label={`Rename ${item.name}`}
+                        className="rounded p-1 text-fg-subtle hover:text-fg"
+                      >
+                        <Icon name="pencil" className="h-3 w-3" />
+                      </button>
+                      <button
+                        onClick={() => void deleteProjectItem(item.path)}
+                        title="Delete"
+                        aria-label={`Delete ${item.name}`}
+                        className="rounded p-1 text-fg-subtle hover:text-fail"
+                      >
+                        <Icon name="x" className="h-3 w-3" />
+                      </button>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
 
-              <div className="mt-4 border-t border-[#26352D] pt-3">
-                <p className="text-[10px] font-bold uppercase tracking-wider text-[#71877A]">
-                  Open files
-                </p>
+            <div className="border-t border-line p-3">
+              <dl className="space-y-1.5 text-xs">
                 {[
-                  { label: "Module", file: moduleFile, dirty: moduleDirty },
+                  { label: "Design", file: moduleFile, dirty: moduleDirty },
                   { label: "Testbench", file: testbenchFile, dirty: testbenchDirty },
                 ].map(({ label, file, dirty }) => (
-                  <p key={label} className="mt-1 break-all text-xs text-[#B7C9BD]">
-                    <span className="text-[#71877A]">{label}: </span>
-                    {file || "not linked to a file"}
-                    {file && dirty && (
-                      <span className="ml-1 text-[#F5C451]">● unsaved</span>
-                    )}
-                  </p>
+                  <div key={label} className="flex items-center justify-between gap-2">
+                    <dt className="text-fg-subtle">{label}</dt>
+                    <dd className="flex min-w-0 items-center gap-1.5 font-mono text-[11px] text-fg-muted">
+                      <span className="truncate" title={file || undefined}>
+                        {file ? fileLabel(file, "") : "unlinked"}
+                      </span>
+                      {file && dirty && (
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent" title="Unsaved changes" />
+                      )}
+                    </dd>
+                  </div>
                 ))}
-                <button
-                  onClick={() => void saveProjectFile()}
-                  disabled={
-                    (!moduleFile || !moduleDirty) &&
-                    (!testbenchFile || !testbenchDirty)
-                  }
-                  className="mt-3 w-full rounded-lg bg-[#39E58C] px-3 py-2 text-xs font-bold text-[#07110B] hover:bg-[#65F5A7] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Save Open Files
-                </button>
-              </div>
-
+              </dl>
+              <button
+                onClick={() => void saveProjectFile()}
+                disabled={
+                  (!moduleFile || !moduleDirty) &&
+                  (!testbenchFile || !testbenchDirty)
+                }
+                className={`${btnSecondary} mt-3 h-8 w-full text-xs`}
+              >
+                <Icon name="save" className="h-3.5 w-3.5" />
+                Save changes
+              </button>
               {projectMessage && (
-                <p className="mt-3 break-words text-xs text-[#62ECA0]">
-                  {projectMessage}
-                </p>
+                <p className="mt-2 break-words text-[11px] text-fg-muted">{projectMessage}</p>
               )}
               {projectError && (
-                <p className="mt-3 break-words text-xs text-red-400">
-                  {projectError}
-                </p>
+                <p className="mt-2 break-words text-[11px] text-fail">{projectError}</p>
               )}
-              <p className="mt-4 text-[10px] leading-5 text-[#53645A]">
-                Files are stored in the LogicForge backend workspace. Supported
-                file types: .v, .sv and .txt.
+              <p className="mt-3 text-[11px] leading-4 text-fg-subtle">
+                .v, .sv and .txt files, stored in the backend workspace.
               </p>
-            </section>
-          </aside>
+            </div>
+          </section>
+        </aside>
 
-          <div className="min-w-0">
-            <section className={`${panelClass} mb-6 p-5 md:p-6`}>
-              <div className="mb-4 flex items-center gap-2">
-                <span className="text-[#39E58C]">✳</span>
-                <h2 className="text-lg font-bold text-white">
-                  Describe your digital circuit
-                </h2>
+        <div className="min-w-0 space-y-5">
+          {/* ---------------- Prompt composer ---------------- */}
+          <section className={`${panel} focus-within:border-accent/40`}>
+            <label htmlFor="circuit-prompt" className="sr-only">
+              Circuit description
+            </label>
+            <textarea
+              id="circuit-prompt"
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !busy) {
+                  event.preventDefault();
+                  void generateCode();
+                }
+              }}
+              placeholder="Describe a circuit — e.g. 4-bit binary adder with carry in and carry out"
+              rows={3}
+              className="block w-full resize-y border-0 bg-transparent px-4 pt-3.5 pb-2 text-[14px] leading-6 text-fg placeholder:text-fg-subtle focus:shadow-none focus:outline-none focus-visible:outline-none"
+            />
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 pb-3">
+              <p className="text-xs text-fg-subtle">
+                Name the inputs, outputs and behaviour.{" "}
+                <span className="hidden font-mono text-[11px] sm:inline">
+                  <kbd className="rounded border border-line-strong px-1 py-px">⌘</kbd>{" "}
+                  <kbd className="rounded border border-line-strong px-1 py-px">↵</kbd> to generate
+                </span>
+              </p>
+              <button onClick={generateCode} disabled={busy} className={btnPrimary}>
+                {loading ? <span className="lf-spinner" /> : null}
+                {loading ? "Generating" : "Generate"}
+                {!loading && <Icon name="arrow" className="h-3.5 w-3.5" />}
+              </button>
+            </div>
+            {!moduleCode.trim() && (
+              <div className="flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-2.5">
+                <span className="mr-1 text-xs text-fg-subtle">Try</span>
+                {EXAMPLE_PROMPTS.map((example) => (
+                  <button
+                    key={example}
+                    onClick={() => {
+                      setPrompt(example);
+                      document.getElementById("circuit-prompt")?.focus();
+                    }}
+                    className={`rounded-full border px-2.5 py-1 text-xs ${
+                      prompt === example
+                        ? "border-accent/50 bg-accent-soft text-accent"
+                        : "border-line-strong text-fg-muted hover:border-fg-subtle/60 hover:text-fg"
+                    }`}
+                  >
+                    {example}
+                  </button>
+                ))}
               </div>
-              <textarea
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="e.g. Design a 4-bit binary adder with carry input and carry output..."
-                rows={4}
-                className="w-full resize-y rounded-xl border border-[#2B4032] bg-[#0A100C] p-4 text-sm leading-6 text-[#E7EEE9] outline-none placeholder:text-[#91A198] focus:border-[#39E58C] focus:ring-2 focus:ring-[#39E58C]/10"
+            )}
+          </section>
+
+          {/* ---------------- Editors ---------------- */}
+          <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
+            <section className={panel}>
+              <PanelHeader
+                title={fileLabel(moduleFile, "design.v")}
+                meta={moduleFile && moduleDirty ? "modified" : "design"}
               />
-              <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                <p className="text-xs text-[#71877A]">
-                  Describe the inputs, outputs and expected circuit behavior.
-                </p>
-                <button
-                  onClick={generateCode}
-                  disabled={busy}
-                  className={buttonClass}
-                >
-                  {loading ? "Generating..." : "✦ Generate Verilog"}
-                </button>
-              </div>
-            </section>
-
-            <div className="mb-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
-              <section className={panelClass}>
-                <div className="flex items-center justify-between border-b border-[#26352D] bg-[#141D17] px-4 py-4">
-                  <div>
-                    <h2 className="font-bold text-white">Verilog Module</h2>
-                    <p className="mt-1 text-xs text-[#71877A]">
-                      Your digital circuit design
-                    </p>
-                  </div>
-                  <span className="rounded-md border border-[#365B43] bg-[#17251B] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#62ECA0]">
-                    Design
-                  </span>
-                </div>
+              <div className="relative">
+                {!moduleCode && (
+                  <EditorHint
+                    title="No design yet"
+                    body="Describe a circuit above and press Generate, open a .v file from Files, or start typing here."
+                  />
+                )}
                 <Editor
-                  height="350px"
+                  height="380px"
                   language="verilog"
                   theme="logicforge-dark"
                   beforeMount={configureMonaco}
+                  loading={<div className="h-full w-full bg-code" />}
                   value={moduleCode}
                   onChange={(value) => setModuleCode(value || "")}
-                  options={{
-                    minimap: { enabled: false },
-                    fontSize: 13,
-                    automaticLayout: true,
-                    scrollBeyondLastLine: false,
-                    padding: { top: 14 },
-                    roundedSelection: true,
-                    cursorBlinking: "smooth",
-                    smoothScrolling: true,
-                  }}
+                  options={EDITOR_OPTIONS}
                 />
-              </section>
+              </div>
+            </section>
 
-              <section className={panelClass}>
-                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#26352D] bg-[#141D17] px-4 py-4">
-                  <div>
-                    <h2 className="font-bold text-white">Testbench</h2>
-                    <p className="mt-1 text-xs text-[#71877A]">
-                      Test vectors and verification logic
-                    </p>
-                  </div>
-                  <span className="rounded-md border border-[#365B43] bg-[#17251B] px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-[#62ECA0]">
-                    Verification
-                  </span>
+            <section className={panel}>
+              <PanelHeader
+                title={fileLabel(testbenchFile, "testbench.v")}
+                meta={testbenchFile && testbenchDirty ? "modified" : "testbench"}
+              >
+                <button
+                  onClick={generateTestbench}
+                  disabled={busy || !moduleCode.trim()}
+                  className={btnGhost}
+                  title="Write a self-checking testbench for the design"
+                >
+                  {generatingTestbench ? (
+                    <span className="lf-spinner" />
+                  ) : (
+                    <Icon name="beaker" className="h-3.5 w-3.5" />
+                  )}
+                  {generatingTestbench ? "Writing…" : "Generate testbench"}
+                </button>
+              </PanelHeader>
+              {testbenchError && (
+                <div className="border-b border-line bg-fail-soft px-4 py-2.5 text-xs leading-5 whitespace-pre-wrap text-fail">
+                  {testbenchError}
                 </div>
-                <div className="p-3">
-                  <button
-                    onClick={generateTestbench}
-                    disabled={busy || !moduleCode.trim()}
-                    className="rounded-lg border border-[#365B43] bg-[#17251B] px-3 py-2 text-xs font-semibold text-[#62ECA0] transition hover:border-[#39E58C] hover:bg-[#203528] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    {generatingTestbench
-                      ? "Generating..."
-                      : "✦ Generate with AI"}
-                  </button>
+              )}
+              {testbenchExplanation && (
+                <div className="border-b border-line px-4 py-2.5 text-xs leading-5 whitespace-pre-wrap text-fg-muted">
+                  {testbenchExplanation}
                 </div>
-                {testbenchError && (
-                  <div className="mx-3 mb-3 rounded-xl border border-red-900/60 bg-red-950/20 p-4 text-sm text-red-300">
-                    {testbenchError}
-                  </div>
-                )}
-                {testbenchExplanation && (
-                  <div className="mx-3 mb-3 rounded-xl border border-[#294432] bg-[#101713] p-4">
-                    <h3 className="mb-2 font-bold text-[#62ECA0]">
-                      ✦ AI Testbench Analysis
-                    </h3>
-                    <p className="whitespace-pre-wrap text-sm leading-6 text-[#B7C9BD]">
-                      {testbenchExplanation}
-                    </p>
-                  </div>
+              )}
+              <div className="relative">
+                {!testbenchCode && (
+                  <EditorHint
+                    title="No testbench yet"
+                    body={
+                      moduleCode.trim()
+                        ? "Press Generate testbench for a self-checking test of your design, or write your own."
+                        : "It is created together with the design, or from any design with Generate testbench."
+                    }
+                  />
                 )}
                 <Editor
-                  height="350px"
+                  height="380px"
                   language="verilog"
                   theme="logicforge-dark"
                   beforeMount={configureMonaco}
+                  loading={<div className="h-full w-full bg-code" />}
                   value={testbenchCode}
                   onChange={(value) => setTestbenchCode(value || "")}
-                  options={{
-                    minimap: { enabled: false },
-                    fontSize: 13,
-                    automaticLayout: true,
-                    scrollBeyondLastLine: false,
-                    padding: { top: 14 },
-                    roundedSelection: true,
-                    cursorBlinking: "smooth",
-                    smoothScrolling: true,
-                  }}
+                  options={EDITOR_OPTIONS}
                 />
-              </section>
+              </div>
+            </section>
+          </div>
+
+          {/* ---------------- Action bar ---------------- */}
+          <section className={`${panel} flex flex-wrap items-center justify-between gap-3 px-3 py-2.5`}>
+            <div className="flex flex-wrap items-center gap-2">
+              <button onClick={runSimulation} disabled={busy} className={btnPrimary}>
+                {simulating ? <span className="lf-spinner" /> : <Icon name="play" className="h-3.5 w-3.5" />}
+                {simulating ? "Running" : "Run simulation"}
+              </button>
+              <button onClick={debugVerilog} disabled={busy} className={btnSecondary}>
+                {debugging ? <span className="lf-spinner" /> : <Icon name="wrench" className="h-3.5 w-3.5" />}
+                {debugging ? "Analysing" : "Debug & fix"}
+              </button>
             </div>
+            <p className="font-mono text-[11px] text-fg-subtle">
+              iverilog → vvp · results below
+            </p>
+          </section>
 
-            <section className={`${panelClass} mb-6 p-4`}>
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h2 className="font-bold text-white">Simulation Control</h2>
-                  <p className="mt-1 text-xs text-[#71877A]">
-                    Compile and execute your Verilog testbench.
-                  </p>
-                </div>
+          {/* ---------------- Debug report ---------------- */}
+          {debugResult && (
+            <section className={panel}>
+              <PanelHeader title="Debug report" meta={debugResult.success ? undefined : "failed"}>
                 <button
-                  onClick={runSimulation}
-                  disabled={busy}
-                  className={buttonClass}
+                  onClick={() => setDebugResult(null)}
+                  className={btnGhost}
+                  aria-label="Close debug report"
                 >
-                  {simulating ? "Running Simulation..." : "▶ Run Simulation"}
+                  <Icon name="x" className="h-3.5 w-3.5" />
                 </button>
-              </div>
-            </section>
-
-            <section className={`${panelClass} mb-6 p-4`}>
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h2 className="font-bold text-white">AI Debugger</h2>
-                  <p className="mt-1 text-xs text-[#91A198]">
-                    Analyze compilation errors and failed test cases with AI.
-                  </p>
-                </div>
-                <button
-                  onClick={debugVerilog}
-                  disabled={busy}
-                  className={buttonClass}
-                >
-                  {debugging ? "Analyzing Code..." : "✦ AI Debug & Fix"}
-                </button>
-              </div>
-            </section>
-
-            {debugResult && (
-              <section className={`${panelClass} mb-6 p-5`}>
-                {debugResult.success ? (
-                  <>
-                    <div className="mb-4 flex items-center gap-2">
-                      <span className="text-xl text-[#39E58C]">✦</span>
-                      <h2 className="font-bold text-[#62ECA0]">
-                        AI Debugging Analysis
-                      </h2>
-                    </div>
-                    <div className="mb-4 rounded-xl border border-red-900/60 bg-red-950/20 p-4">
-                      <h3 className="mb-2 text-sm font-bold text-red-400">
-                        Root Cause
-                      </h3>
-                      <p className="whitespace-pre-wrap text-sm leading-6 text-[#D5DED8]">
-                        {debugResult.root_cause}
-                      </p>
-                    </div>
-                    <div className="mb-4 rounded-xl border border-[#294432] bg-[#0B120D] p-4">
-                      <h3 className="mb-2 text-sm font-bold text-[#62ECA0]">
-                        Explanation
-                      </h3>
-                      <p className="whitespace-pre-wrap text-sm leading-6 text-[#B7C9BD]">
-                        {debugResult.explanation}
-                      </p>
-                    </div>
-                    <div className="mb-4 rounded-xl border border-[#294432] bg-[#0B120D] p-4">
-                      <h3 className="mb-2 text-sm font-bold text-[#62ECA0]">
-                        Changes Made
-                      </h3>
-                      <p className="whitespace-pre-wrap text-sm leading-6 text-[#B7C9BD]">
-                        {debugResult.changes_made}
-                      </p>
-                    </div>
-                    {Array.isArray(debugResult.notes) && debugResult.notes.length > 0 && (
-                      <p className="mb-4 whitespace-pre-wrap rounded-xl border border-yellow-900 bg-yellow-950/30 p-3 text-xs leading-5 text-yellow-300">
-                        {debugResult.notes.join("\n")}
-                      </p>
-                    )}
-                    <div className="flex flex-wrap gap-3">
-                      {debugResult.module_changed === false &&
-                      debugResult.testbench_changed === false ? (
-                        <span className="rounded-xl border border-[#365B43] px-5 py-3 text-sm text-[#B7C9BD]">
-                          No code changes suggested
-                        </span>
-                      ) : (
-                        <button
-                          onClick={applyDebugFix}
-                          disabled={busy}
-                          className={buttonClass}
-                        >
-                          ✓ Apply AI Fix
-                          {debugResult.module_changed === false
-                            ? " (testbench only)"
-                            : debugResult.testbench_changed === false
-                              ? " (design only)"
-                              : ""}
-                        </button>
-                      )}
-                      <button
-                        onClick={() => setDebugResult(null)}
-                        className="rounded-xl border border-[#365B43] px-5 py-3 text-sm font-semibold text-[#B7C9BD] transition hover:border-[#39E58C] hover:text-white"
-                      >
-                        Dismiss
-                      </button>
-                    </div>
-                    <p className="mt-3 text-xs text-[#71877A]">
-                      Review the suggested correction before applying it. Run
-                      simulation again to verify the fix.
-                    </p>
-                  </>
-                ) : (
-                  <div>
-                    <h2 className="mb-2 font-bold text-red-400">
-                      AI Debugging Failed
-                    </h2>
-                    <p className="whitespace-pre-wrap text-sm text-[#B7C9BD]">
-                      {debugResult.error || "Unable to analyze the code."}
+              </PanelHeader>
+              {debugResult.success ? (
+                <div className="space-y-4 p-4">
+                  <div className="border-l-2 border-fail pl-3">
+                    <h3 className="mb-1 text-[11px] font-medium uppercase tracking-wider text-fg-subtle">
+                      Root cause
+                    </h3>
+                    <p className="text-sm leading-6 whitespace-pre-wrap text-fg">
+                      {debugResult.root_cause}
                     </p>
                   </div>
-                )}
-              </section>
-            )}
-
-            {explanation && (
-              <section className={`${panelClass} mb-6 p-5`}>
-                <div className="mb-3 flex items-center gap-2">
-                  <span className="text-[#39E58C]">✦</span>
-                  <h2 className="font-bold text-[#62ECA0]">AI Explanation</h2>
-                </div>
-                <p className="whitespace-pre-wrap text-sm leading-7 text-[#B7C9BD]">
-                  {explanation}
-                </p>
-              </section>
-            )}
-
-            {output && (
-              <section className={`${panelClass} mb-6`}>
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#26352D] bg-[#141D17] px-5 py-4">
-                  <h2 className="font-bold text-white">Simulation Output</h2>
-                  {simulationSuccess !== null && (
-                    <span
-                      className={`rounded-full border px-3 py-1 text-xs font-bold ${
-                        simulationSuccess
-                          ? "border-[#286A45] bg-[#143322] text-[#62ECA0]"
-                          : "border-red-900 bg-red-950/50 text-red-400"
-                      }`}
-                    >
-                      {simulationSuccess
-                        ? simulationVerdict === "UNVERIFIED"
-                          ? "✓ Ran, no summary"
-                          : `✓ PASS${simulationTests != null ? ` (${simulationTests} tests)` : ""}`
-                        : "✕ FAIL"}
-                    </span>
+                  <div className="pl-3.5">
+                    <h3 className="mb-1 text-[11px] font-medium uppercase tracking-wider text-fg-subtle">
+                      Explanation
+                    </h3>
+                    <p className="text-sm leading-6 whitespace-pre-wrap text-fg-muted">
+                      {debugResult.explanation}
+                    </p>
+                  </div>
+                  <div className="pl-3.5">
+                    <h3 className="mb-1 text-[11px] font-medium uppercase tracking-wider text-fg-subtle">
+                      Changes
+                    </h3>
+                    <p className="font-mono text-xs leading-5 whitespace-pre-wrap text-fg-muted">
+                      {debugResult.changes_made}
+                    </p>
+                  </div>
+                  {Array.isArray(debugResult.notes) && debugResult.notes.length > 0 && (
+                    <p className="rounded-md border border-accent/25 bg-accent-soft px-3 py-2 text-xs leading-5 whitespace-pre-wrap text-accent">
+                      {debugResult.notes.join("\n")}
+                    </p>
                   )}
+                  <div className="flex flex-wrap items-center gap-2 border-t border-line pt-4">
+                    {debugResult.module_changed === false &&
+                    debugResult.testbench_changed === false ? (
+                      <span className="text-xs text-fg-muted">No code changes suggested.</span>
+                    ) : (
+                      <button onClick={applyDebugFix} disabled={busy} className={btnPrimary}>
+                        <Icon name="check" className="h-3.5 w-3.5" />
+                        Apply fix
+                        {debugResult.module_changed === false
+                          ? " to testbench"
+                          : debugResult.testbench_changed === false
+                            ? " to design"
+                            : ""}
+                      </button>
+                    )}
+                    <button onClick={() => setDebugResult(null)} className={btnSecondary}>
+                      Dismiss
+                    </button>
+                    <span className="text-xs text-fg-subtle">
+                      Review before applying, then run the simulation again.
+                    </span>
+                  </div>
                 </div>
-                <pre className="overflow-x-auto whitespace-pre-wrap p-5 font-mono text-xs leading-6 text-[#B7C9BD]">
-                  {output}
+              ) : (
+                <p className="p-4 text-sm whitespace-pre-wrap text-fail">
+                  {debugResult.error || "Unable to analyse the code."}
+                </p>
+              )}
+            </section>
+          )}
+
+          {/* ---------------- Design notes ---------------- */}
+          {explanation && (
+            <section className={panel}>
+              <PanelHeader title="Design notes" />
+              <p className="px-4 py-3 text-sm leading-6 whitespace-pre-wrap text-fg-muted">
+                {explanation}
+              </p>
+            </section>
+          )}
+
+          {/* ---------------- Output ---------------- */}
+          {output && (
+            <section className={panel}>
+              <PanelHeader title="Output">
+                {verdictBadge && (
+                  <span
+                    className={`rounded-full border px-2 py-0.5 font-mono text-[11px] ${verdictBadge.tone}`}
+                  >
+                    {verdictBadge.text}
+                  </span>
+                )}
+              </PanelHeader>
+              <pre className="max-h-[420px] overflow-auto bg-code px-4 py-3 font-mono text-xs leading-5 whitespace-pre-wrap">
+                {output.split("\n").map((line, index) => (
+                  <OutputLine key={index} line={line} />
+                ))}
+              </pre>
+            </section>
+          )}
+
+          {/* ---------------- Waveform ---------------- */}
+          {vcd && (
+            <section className="space-y-3">
+              <WaveformViewer vcd={vcd} />
+              <details className="group overflow-hidden rounded-lg border border-line bg-surface">
+                <summary className="flex h-10 cursor-pointer list-none items-center gap-2 px-4 text-xs text-fg-muted hover:text-fg">
+                  <span className="transition-transform group-open:rotate-90">›</span>
+                  Raw VCD data
+                </summary>
+                <pre className="max-h-96 overflow-auto border-t border-line bg-code p-4 font-mono text-[11px] leading-5 whitespace-pre-wrap text-fg-subtle">
+                  {vcd}
                 </pre>
-              </section>
-            )}
-
-            {vcd && (
-              <section className="mb-6">
-                <WaveformViewer vcd={vcd} />
-                <details className="mt-4 overflow-hidden rounded-xl border border-[#26352D] bg-[#101713]">
-                  <summary className="cursor-pointer px-5 py-4 text-sm font-semibold text-[#91A198] hover:text-[#62ECA0]">
-                    View Generated VCD Waveform Data
-                  </summary>
-                  <pre className="max-h-96 overflow-auto whitespace-pre-wrap border-t border-[#26352D] p-4 font-mono text-xs leading-5 text-[#91A198]">
-                    {vcd}
-                  </pre>
-                </details>
-              </section>
-            )}
-          </div>
+              </details>
+            </section>
+          )}
         </div>
-
-        <footer className="mt-12 border-t border-[#26352D] pt-6 text-center">
-          <p className="text-sm font-semibold tracking-wide text-[#91A198]">
-            LogicForge <span className="text-[#39E58C]">AI</span>
-          </p>
-          <p className="mt-1 text-xs text-[#53645A]">
-            Verilog Generation · Simulation · Waveform Analysis
-          </p>
-        </footer>
       </div>
+
+      <footer className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 border-t border-line px-4 py-5 font-mono text-[11px] text-fg-subtle md:px-6">
+        <span>LogicForge</span>
+        <span>Icarus Verilog · Ollama</span>
+      </footer>
     </main>
   );
 }

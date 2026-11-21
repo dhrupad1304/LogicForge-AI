@@ -15,11 +15,12 @@ from ai.prompts import (
     VERILOG_PROMPT,
     fill_prompt,
 )
+import config
 from services.simulation_service import blank_comments, compile_only, simulate
 
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "qwen2.5-coder:3b"
+OLLAMA_URL = config.OLLAMA_URL
+OLLAMA_MODEL = config.OLLAMA_MODEL
 
 # Ollama's default context window (2048-4096 tokens) is too small for the
 # prompt plus a full design and testbench, which silently truncates input.
@@ -58,7 +59,7 @@ def clean_verilog(code: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _call_ollama(
+def _ollama_request(
     system_prompt: str,
     user_prompt: str,
     options: dict,
@@ -413,6 +414,137 @@ def _ensure_clock(module_code: str, testbench_code: str) -> tuple[str, list[str]
     return patched, [f"Added missing clock generator: always #5 {clock} = ~{clock};"]
 
 
+# Models that accept server-side refusal fallbacks (fallbacks="default").
+_FALLBACK_MODELS = {
+    "claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5-5",
+}
+_anthropic_client = None
+
+
+def _anthropic_request(
+    system_prompt: str,
+    user_prompt: str,
+    fields: list[str],
+    task: str,
+) -> dict:
+    """
+    Ask Claude for a JSON object with exactly `fields` (all strings), using
+    structured outputs so the response is always valid JSON. Every failure
+    is raised as RuntimeError so the API returns a readable 502.
+    """
+
+    global _anthropic_client
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise RuntimeError(
+            "The anthropic package is not installed. Run: pip install anthropic"
+        ) from exc
+
+    if _anthropic_client is None:
+        # Credentials come from ANTHROPIC_API_KEY (or an `ant auth login`
+        # profile); never hard-code a key here.
+        _anthropic_client = anthropic.Anthropic()
+
+    schema = {
+        "type": "object",
+        "properties": {field: {"type": "string"} for field in fields},
+        "required": list(fields),
+        "additionalProperties": False,
+    }
+    request = dict(
+        model=config.ANTHROPIC_MODEL,
+        max_tokens=16000,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+        output_config={
+            "effort": config.ANTHROPIC_EFFORT,
+            "format": {"type": "json_schema", "schema": schema},
+        },
+    )
+
+    try:
+        if config.ANTHROPIC_MODEL in _FALLBACK_MODELS:
+            # On a policy decline the API retries on a suitable model.
+            response = _anthropic_client.beta.messages.create(
+                **request,
+                betas=["server-side-fallback-2026-07-01"],
+                fallbacks="default",
+            )
+        else:
+            response = _anthropic_client.messages.create(**request)
+    except anthropic.AuthenticationError as exc:
+        raise RuntimeError(
+            "Claude API credentials are missing or invalid. Set "
+            "ANTHROPIC_API_KEY in backend/.env and restart the backend."
+        ) from exc
+    except anthropic.PermissionDeniedError as exc:
+        raise RuntimeError("This Claude API key cannot use the configured model.") from exc
+    except anthropic.NotFoundError as exc:
+        raise RuntimeError(
+            f"Claude model {config.ANTHROPIC_MODEL!r} was not found. "
+            "Check LOGICFORGE_ANTHROPIC_MODEL."
+        ) from exc
+    except anthropic.RateLimitError as exc:
+        raise RuntimeError("The Claude API rate limit was reached. Try again shortly.") from exc
+    except anthropic.APIStatusError as exc:
+        raise RuntimeError(f"Claude API error {exc.status_code}: {exc.message}") from exc
+    except anthropic.APIConnectionError as exc:
+        raise RuntimeError("Cannot reach the Claude API. Check your internet connection.") from exc
+
+    if response.stop_reason == "refusal":
+        raise RuntimeError(f"Claude declined the {task.lower()} request.")
+    if response.stop_reason == "max_tokens":
+        raise RuntimeError(f"The Claude response for {task.lower()} was cut off.")
+
+    text = next((block.text for block in response.content if block.type == "text"), "")
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Claude returned malformed JSON for {task.lower()}.") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError(f"Claude response for {task.lower()} must be a JSON object.")
+    return result
+
+
+def _call_model(
+    system_prompt: str,
+    user_prompt: str,
+    options: dict,
+    timeout: int,
+    required_fields: list[str],
+    task: str,
+    optional_fields: Optional[list[str]] = None,
+) -> dict:
+    """
+    Send one JSON-returning request to the configured model provider.
+
+    required_fields must be non-empty strings; optional_fields may be empty
+    or missing (they are returned as "").
+    """
+
+    optional_fields = optional_fields or []
+
+    if config.AI_PROVIDER == "anthropic":
+        # Sampling options (temperature, num_ctx, ...) are Ollama-only.
+        result = _anthropic_request(
+            system_prompt, user_prompt, required_fields + optional_fields, task
+        )
+        for field in required_fields:
+            if not isinstance(result.get(field), str) or not result[field].strip():
+                raise RuntimeError(f"AI response is missing a valid '{field}' field.")
+    else:
+        result = _ollama_request(
+            system_prompt, user_prompt, options, timeout, required_fields, task
+        )
+
+    for field in optional_fields:
+        value = result.get(field)
+        result[field] = value if isinstance(value, str) else ""
+    return result
+
+
 def _design_module_names(module_code: str) -> list[str]:
     return MODULE_NAME.findall(blank_comments(module_code))
 
@@ -726,7 +858,7 @@ def _ai_repair(
         "module_code", "testbench_code"
     ]
 
-    result = _call_ollama(
+    result = _call_model(
         system_prompt=(
             "You are a precise Verilog repair assistant. Return only valid "
             "JSON. Fix compile errors without removing tests."
@@ -877,7 +1009,7 @@ def _with_retry(request: Callable[[float], dict]) -> dict:
 
 
 def _generate_design_and_testbench(user_input: str, temperature: float) -> dict:
-    result = _call_ollama(
+    result = _call_model(
         system_prompt=(
             "You are an expert digital hardware engineer. "
             "Return only valid JSON matching the requested structure. "
@@ -1009,7 +1141,7 @@ Return ONLY valid JSON with exactly these string fields:
 }}
 """
 
-    result = _call_ollama(
+    result = _call_model(
         system_prompt=(
             "You are a precise Verilog debugging assistant. "
             "Return only valid JSON. Preserve the design interface "
@@ -1112,7 +1244,7 @@ def generate_testbench(module_code: str) -> dict:
     prompt = fill_prompt(TESTBENCH_GENERATION_PROMPT, module_code=module_code)
 
     def request_testbench(temperature: float) -> dict:
-        result = _call_ollama(
+        result = _call_model(
             system_prompt=(
                 "You are an expert hardware verification engineer. "
                 "Generate concise, valid Verilog-2001 testbenches. "

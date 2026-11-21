@@ -36,6 +36,29 @@ npm install
 npm run dev
 ```
 
+## How generation is verified
+1. The AI writes the **design** only. It is compile-checked with Icarus
+   Verilog (Verilog-2005 rules), common mistakes are fixed in code, and the
+   AI repairs whatever is left.
+2. The **testbench is built in code** from the design's ports: declarations,
+   stimulus (all input combinations, or random vectors for wide inputs),
+   clock and reset, comparisons and the PASS/FAIL summary.
+3. In a **separate request**, the AI writes only the expected-value logic
+   (a reference model) from your description and the port list. It never
+   sees the design's code, so a PASS means two independent versions agree.
+4. On FAIL, it tries a fresh design, then a fresh reference model, and keeps
+   the pair that agrees (or reports the closest one honestly).
+
+## Choosing the AI model
+Copy `backend/.env.example` to `backend/.env` and set:
+- `LOGICFORGE_AI_PROVIDER=ollama` (default) with `LOGICFORGE_OLLAMA_MODEL`
+  for a local model, or
+- `LOGICFORGE_AI_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` to use Claude
+  (much better on FSMs, ALUs and protocols; billed per use).
+
+Restart the backend after changing it. The active model is shown in the
+top-right corner of the app.
+
 ## Notes
 - Workspace files are stored in `backend/workspace/` (not committed to git).
 - Simulations reject Verilog that accesses host files (`$fopen`,
