@@ -443,3 +443,65 @@ Outputs driven by assign are wire; outputs assigned in always blocks are reg.
 Return ONLY a JSON object: {"module_code": "...", "explanation": "..."}
 No Markdown fences. Escape newlines as \\n and quotes as \\" inside JSON.
 """
+
+
+GOLDEN_MODEL_PROMPT = """
+You are a verification engineer. Write a REFERENCE MODEL: a simple,
+behavioural Verilog-2001 module that implements the specification below.
+It will be compared with a separately written design on every test, so it
+must be obviously correct rather than clever.
+
+SPECIFICATION:
+{spec}
+
+Use EXACTLY this module header: same module name, port names, directions
+and widths. You may write "output reg" for an output you assign inside an
+always block.
+{header}
+
+{style}
+
+RULES:
+- Combinational logic: one always @(*) block using case / if / arithmetic
+  operators (or simple assign statements).
+- Registers: always @(posedge {clock} ...) with non-blocking (<=).
+- {reset_note}
+- Synthesizable Verilog-2001. Declare every internal signal.
+- No initial blocks, $display, $finish or delays (#).
+""" + COMMON_CONVENTIONS + """
+Return ONLY a JSON object with exactly these string keys:
+{"module_code": "...", "explanation": "..."}
+- module_code: the complete module (header above ... endmodule).
+- explanation: one sentence.
+No Markdown fences. Escape newlines as \\n and quotes as \\" inside JSON.
+"""
+
+
+GOLDEN_STYLE_FROM_SPEC = (
+    "You do not see the design's code. Work only from the specification."
+)
+
+GOLDEN_STYLE_FROM_DESIGN = (
+    "The specification is the design module shown above. Re-implement the "
+    "same behaviour as a behavioural model (for example with an always @(*) "
+    "block). Using the same operators (+, >, ==, ^ ...) is fine and "
+    "encouraged; do not paste the design's code unchanged."
+)
+
+
+GOLDEN_REPAIR_PROMPT = """
+Your reference-model module has problems.
+
+PROBLEMS:
+{problems}
+
+YOUR MODULE:
+{module_code}
+
+The module must start with exactly this header (outputs may be "output reg"):
+{header}
+
+Fix the problems and return the complete corrected module as JSON:
+{"module_code": "...", "explanation": "..."}
+No Markdown fences. Escape newlines as \\n and quotes as \\" inside JSON.
+"""

@@ -43,6 +43,8 @@ type Verification = {
   method?: "template" | "free-form";
   independent?: boolean;
   model?: string;
+  gave_up?: boolean;
+  message?: string;
 };
 
 // True only when the text contains a complete Verilog module.
@@ -551,6 +553,8 @@ const ICON_PATHS: Record<string, string> = {
   check: "M5 12.5l4.5 4.5L19 7.5",
   arrow: "M5 12h14M13 6l6 6-6 6",
   save: "M5 3h11l3 3v13a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2zM8 3v5h7M8 21v-7h8v7",
+  chip: "M7 7h10v10H7zM10 3v4M14 3v4M10 17v4M14 17v4M3 10h4M3 14h4M17 10h4M17 14h4",
+  download: "M12 4v11M7 10l5 5 5-5M5 20h14",
 };
 
 function Icon({ name, className = "h-4 w-4" }: { name: string; className?: string }) {
@@ -638,6 +642,148 @@ function OutputLine({ line }: { line: string }) {
   return <div className={tone}>{line || " "}</div>;
 }
 
+type Schematic = {
+  svg: string;
+  view: "gates" | "rtl";
+  cells?: number;
+  gate_cells?: number | null;
+  rtl_cells?: number;
+  note?: string;
+  source: string; // design code the drawing was made from
+};
+
+function SchematicPanel({
+  schematic,
+  loading,
+  error,
+  stale,
+  onDraw,
+  onClose,
+}: {
+  schematic: Schematic | null;
+  loading: boolean;
+  error: string;
+  stale: boolean;
+  onDraw: (view: "auto" | "gates" | "rtl") => void;
+  onClose: () => void;
+}) {
+  const [zoom, setZoom] = useState<"fit" | 1 | 2>("fit");
+  const size = useMemo(() => {
+    const match = schematic?.svg.match(/<svg[^>]*\swidth="(\d+(?:\.\d+)?)"[^>]*\sheight="(\d+(?:\.\d+)?)"/);
+    return match ? { w: Number(match[1]), h: Number(match[2]) } : null;
+  }, [schematic?.svg]);
+  const src = schematic
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(schematic.svg)}`
+    : "";
+  const segment = (active: boolean) =>
+    `h-6 rounded px-2 text-xs ${active ? "bg-surface-3 text-fg" : "text-fg-muted hover:text-fg"}`;
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-line bg-surface">
+      <PanelHeader
+        title="Schematic"
+        meta={
+          schematic
+            ? schematic.view === "gates"
+              ? `${schematic.cells} gates & flip-flops`
+              : `${schematic.cells} RTL blocks`
+            : undefined
+        }
+      >
+        <div className="flex items-center gap-0.5 rounded-md border border-line bg-surface-2 p-0.5">
+          <button
+            onClick={() => onDraw("gates")}
+            disabled={loading}
+            className={segment(schematic?.view === "gates")}
+            title="Logic gates and flip-flops"
+          >
+            Gates
+          </button>
+          <button
+            onClick={() => onDraw("rtl")}
+            disabled={loading}
+            className={segment(schematic?.view === "rtl")}
+            title="Word-level blocks: adders, multiplexers, registers"
+          >
+            RTL
+          </button>
+        </div>
+        {schematic && (
+          <div className="ml-1 flex items-center gap-0.5 rounded-md border border-line bg-surface-2 p-0.5">
+            {(["fit", 1, 2] as const).map((level) => (
+              <button key={String(level)} onClick={() => setZoom(level)} className={segment(zoom === level)}>
+                {level === "fit" ? "Fit" : `${level}×`}
+              </button>
+            ))}
+          </div>
+        )}
+        {schematic && (
+          <a
+            href={src}
+            download={`schematic-${schematic.view}.svg`}
+            className="inline-flex h-7 items-center rounded-md px-2 text-fg-muted hover:bg-surface-3 hover:text-fg"
+            title="Download SVG"
+            aria-label="Download schematic as SVG"
+          >
+            <Icon name="download" className="h-3.5 w-3.5" />
+          </a>
+        )}
+        <button
+          onClick={onClose}
+          className="inline-flex h-7 items-center rounded-md px-2 text-fg-muted hover:bg-surface-3 hover:text-fg"
+          aria-label="Close schematic"
+        >
+          <Icon name="x" className="h-3.5 w-3.5" />
+        </button>
+      </PanelHeader>
+
+      {stale && schematic && !loading && (
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line bg-accent-soft px-4 py-2 text-xs text-accent">
+          The design has changed since this was drawn.
+          <button onClick={() => onDraw("auto")} className="font-medium underline-offset-2 hover:underline">
+            Redraw
+          </button>
+        </div>
+      )}
+
+      <div className="relative max-h-[680px] min-h-40 overflow-auto bg-code p-4">
+        {loading && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-code/70 text-xs text-fg-muted">
+            <span className="lf-spinner text-accent" /> Synthesizing with Yosys…
+          </div>
+        )}
+        {error && !loading && (
+          <p className="text-sm whitespace-pre-wrap text-fail">{error}</p>
+        )}
+        {schematic && !error && (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={src}
+            alt={`${schematic.view === "gates" ? "Gate-level" : "RTL"} schematic of the design`}
+            className={zoom === "fit" ? "mx-auto block h-auto" : "block max-w-none"}
+            style={
+              zoom === "fit"
+                ? {
+                    // Use the panel width (small circuits scale up to 2.5x);
+                    // tall circuits scroll vertically instead of shrinking.
+                    width: size ? `min(100%, ${size.w * 2.5}px)` : "100%",
+                  }
+                : size
+                  ? { width: size.w * zoom * 1.6, height: size.h * zoom * 1.6 }
+                  : undefined
+            }
+          />
+        )}
+      </div>
+      {schematic?.note && (
+        <p className="border-t border-line px-4 py-2 text-[11px] leading-4 text-fg-subtle">
+          {schematic.note}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [moduleCode, setModuleCode] = useState("");
@@ -650,6 +796,10 @@ export default function Home() {
   const [simulationSuccess, setSimulationSuccess] = useState<boolean | null>(null);
   const [simulationVerdict, setSimulationVerdict] = useState<string | null>(null);
   const [modelLabel, setModelLabel] = useState("");
+  const [schematic, setSchematic] = useState<Schematic | null>(null);
+  const [schematicOpen, setSchematicOpen] = useState(false);
+  const [schematicLoading, setSchematicLoading] = useState(false);
+  const [schematicError, setSchematicError] = useState("");
   const [simulationTests, setSimulationTests] = useState<number | null>(null);
   // Raw output and error of the last simulation, sent to the AI debugger.
   const [lastSimulation, setLastSimulation] = useState<{
@@ -897,6 +1047,33 @@ export default function Home() {
     setDebugResult(null);
   };
 
+  const drawSchematic = async (
+    view: "auto" | "gates" | "rtl" = "auto",
+    code: string = moduleCode
+  ) => {
+    if (!code.trim()) return;
+    setSchematicOpen(true);
+    setSchematicLoading(true);
+    setSchematicError("");
+    try {
+      const response = await API.post("/schematic", { module_code: code, view });
+      const data = response.data;
+      if (!data.success) {
+        setSchematic(null);
+        setSchematicError(data.error || "Could not draw the schematic.");
+        return;
+      }
+      setSchematic({ ...data, source: code });
+    } catch (error: any) {
+      setSchematic(null);
+      setSchematicError(
+        error.response?.data?.detail?.toString() || error.message || "Could not draw the schematic."
+      );
+    } finally {
+      setSchematicLoading(false);
+    }
+  };
+
   const generateCode = async () => {
     if (!prompt.trim()) {
       setOutput("Please enter a circuit description.");
@@ -917,6 +1094,21 @@ export default function Home() {
     try {
       const response = await API.post("/generate", { prompt });
       const data = response.data;
+      if (data.verification?.gave_up) {
+        // The model could not make anything work: keep the editors as they
+        // are and show the attempt only as text, clearly marked.
+        setOutput(
+          [
+            data.verification.message,
+            ...(data.verification.log?.length ? ["", "What was tried:", ...data.verification.log] : []),
+            "",
+            "Last attempt (not loaded into the editors):",
+            "",
+            data.module_code || "",
+          ].join("\n")
+        );
+        return;
+      }
       setModuleCode(data.module_code || data.code || "");
       setTestbenchCode(data.testbench_code || "");
       setExplanation(data.explanation || "");
@@ -931,6 +1123,9 @@ export default function Home() {
           .filter(Boolean)
           .join("\n")
       );
+      if (data.verification?.compiled !== false && (data.module_code || data.code)) {
+        void drawSchematic("auto", data.module_code || data.code);
+      }
     } catch (error: any) {
       setOutput(
         error.response?.data?.detail ||
@@ -1346,7 +1541,21 @@ export default function Home() {
               <PanelHeader
                 title={fileLabel(moduleFile, "design.v")}
                 meta={moduleFile && moduleDirty ? "modified" : "design"}
-              />
+              >
+                <button
+                  onClick={() => void drawSchematic("auto")}
+                  disabled={!moduleCode.trim() || schematicLoading}
+                  className={btnGhost}
+                  title="Draw the design as a circuit schematic"
+                >
+                  {schematicLoading ? (
+                    <span className="lf-spinner" />
+                  ) : (
+                    <Icon name="chip" className="h-3.5 w-3.5" />
+                  )}
+                  Schematic
+                </button>
+              </PanelHeader>
               <div className="relative">
                 {!moduleCode && (
                   <EditorHint
@@ -1420,6 +1629,18 @@ export default function Home() {
               </div>
             </section>
           </div>
+
+          {/* ---------------- Schematic ---------------- */}
+          {schematicOpen && (
+            <SchematicPanel
+              schematic={schematic}
+              loading={schematicLoading}
+              error={schematicError}
+              stale={Boolean(schematic && schematic.source !== moduleCode)}
+              onDraw={(view) => void drawSchematic(view)}
+              onClose={() => setSchematicOpen(false)}
+            />
+          )}
 
           {/* ---------------- Action bar ---------------- */}
           <section className={`${panel} flex flex-wrap items-center justify-between gap-3 px-3 py-2.5`}>

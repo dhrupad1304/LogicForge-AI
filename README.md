@@ -6,6 +6,8 @@ AI-powered Verilog generator + simulator.
 - Natural language → Verilog module and self-checking testbench
 - AI testbench generation and AI debugging of failed simulations
 - Simulation using Icarus Verilog, with a built-in waveform viewer
+- Circuit schematics: gate-level (AND/OR/XOR/MUX, flip-flops) or RTL blocks,
+  drawn from the design with Yosys
 - Workspace file explorer and Monaco editor UI
 
 ## Requirements
@@ -13,6 +15,7 @@ AI-powered Verilog generator + simulator.
 - Node.js 20.12+
 - [Icarus Verilog](https://steveicarus.github.io/iverilog/) (`iverilog` and `vvp` on your PATH),
   e.g. `brew install icarus-verilog`
+- [Yosys](https://yosyshq.net/yosys/) for schematics: `brew install yosys`
 - [Ollama](https://ollama.com) running locally with the model used by the backend:
   `ollama pull qwen2.5-coder:3b`
 
@@ -22,6 +25,7 @@ AI-powered Verilog generator + simulator.
 ```bash
 cd backend
 pip install -r requirements.txt
+npm install          # netlistsvg, used to draw schematics
 uvicorn main:app --reload
 ```
 

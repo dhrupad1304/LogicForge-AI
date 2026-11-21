@@ -433,3 +433,156 @@ def validate_snippets(
             problems.append(f"declarations may only contain reg/integer declarations, not: {line.strip()}")
 
     return problems
+
+
+# ---------------------------------------------------------------------------
+# Golden-model testbench: DUT and an independent reference module side by side
+# ---------------------------------------------------------------------------
+
+def reference_header(interface: DesignInterface, ref_name: str) -> str:
+    """The exact module header the reference model must use."""
+    ports = ",\n".join(
+        f"    {p.direction} {'wire ' if p.direction == 'input' else ''}{p.range_text}{p.name}"
+        for p in interface.ports
+    )
+    return f"module {ref_name} (\n{ports}\n);"
+
+
+def build_golden_testbench(
+    interface: DesignInterface,
+    reference_code: str,
+    ref_name: str,
+) -> str:
+    """
+    Testbench that drives the DUT and the reference module with the same
+    inputs and compares every output: after each input vector
+    (combinational) or every clock cycle after reset (sequential). The
+    reference module's code is appended to the testbench file.
+    """
+
+    tb = f"tb_{interface.module}"
+    outputs = interface.outputs
+    data_inputs = interface.data_inputs
+    clock, reset = interface.clock, interface.reset
+
+    lines = [
+        "// Self-checking testbench: the design (dut) is compared with an",
+        "// independently written reference model (golden) on every test.",
+        f"module {tb};",
+    ]
+    for p in interface.inputs:
+        lines.append(f"    reg {p.range_text}{p.name};")
+    for p in outputs:
+        lines.append(f"    wire {p.range_text}{p.name};")
+    for p in outputs:
+        lines.append(f"    wire {p.range_text}expected_{p.name};")
+    lines += [
+        "    integer failures;",
+        "    integer total_tests;",
+        "    integer i;",
+        "    integer seed;",
+        "",
+    ]
+    dut_conn = ",\n".join(f"        .{p.name}({p.name})" for p in interface.ports)
+    ref_conn = ",\n".join(
+        f"        .{p.name}({'expected_' if p.direction == 'output' else ''}{p.name})"
+        for p in interface.ports
+    )
+    lines.append(f"    {interface.module} dut (\n{dut_conn}\n    );")
+    lines.append("")
+    lines.append(f"    {ref_name} golden (\n{ref_conn}\n    );")
+    lines.append("")
+    if clock:
+        lines.append(f"    always #5 {clock.name} = ~{clock.name};")
+        lines.append("")
+
+    mismatch = " || ".join(f"{p.name} !== expected_{p.name}" for p in outputs)
+    in_fmt, in_args = _value_display(data_inputs)
+    exp_fmt, exp_args = _value_display(outputs, "expected_")
+    got_fmt, got_args = _value_display(outputs)
+
+    def check_block(label_fmt: str, label_args: str, pad: int) -> str:
+        fail_args = ", ".join(a for a in (label_args, exp_args, got_args) if a)
+        pass_args = ", ".join(a for a in (label_args, got_args) if a)
+        body = [
+            "total_tests = total_tests + 1;",
+            f"if ({mismatch}) begin",
+            "    failures = failures + 1;",
+            f'    $display("FAIL: {label_fmt} | expected {exp_fmt} | got {got_fmt}", {fail_args});',
+            "end else begin",
+            f'    $display("PASS: {label_fmt} | {got_fmt}", {pass_args});',
+            "end",
+        ]
+        return "\n".join(" " * pad + b for b in body)
+
+    lines += [
+        "    initial begin",
+        "        failures = 0;",
+        "        total_tests = 0;",
+        "        seed = 1;",
+    ]
+    for p in interface.inputs:
+        lines.append(f"        {p.name} = 0;")
+    lines += [
+        "",
+        '        $dumpfile("logicforge_waveform.vcd");',
+        f"        $dumpvars(0, {tb});",
+        "",
+    ]
+
+    if not clock:
+        bits = stimulus_bits(interface)
+        concat = "{" + ", ".join(p.name for p in data_inputs) + "}"
+        if bits <= MAX_EXHAUSTIVE_BITS:
+            count = 2 ** bits
+            assign = f"{concat} = i;"
+            lines.append(f"        // all {count} input combinations")
+        else:
+            count = RANDOM_VECTORS
+            assign = (
+                f"if (i == 0) {concat} = {{{bits}{{1'b0}}}};\n"
+                f"else if (i == 1) {concat} = {{{bits}{{1'b1}}}};\n"
+                f"else {concat} = {_random_concat(bits)};"
+            )
+            lines.append(f"        // {count} vectors: all zeros, all ones, then random")
+        lines.append(f"        for (i = 0; i < {count}; i = i + 1) begin")
+        lines.append(_indent(assign, 12))
+        lines.append("            #10;")
+        lines.append(check_block(in_fmt, in_args, 12))
+        lines.append("        end")
+    else:
+        active = "1'b0" if interface.reset_active_low else "1'b1"
+        inactive = "1'b1" if interface.reset_active_low else "1'b0"
+        lines += [
+            f"        {reset.name} = {active};",
+            f"        @(posedge {clock.name}); #1;",
+            f"        @(posedge {clock.name}); #1;",
+            f"        {reset.name} = {inactive};",
+            f"        for (i = 0; i < {SEQUENTIAL_CYCLES}; i = i + 1) begin",
+            check_block("cycle=%0d" + (" " + in_fmt if in_fmt else ""),
+                        "i" + (", " + in_args if in_args else ""), 12),
+        ]
+        if data_inputs:
+            concat = "{" + ", ".join(p.name for p in data_inputs) + "}"
+            lines.append(f"            {concat} = {_random_concat(stimulus_bits(interface))};")
+        lines += [
+            f"            @(posedge {clock.name}); #1;",
+            "        end",
+        ]
+
+    lines += [
+        "",
+        '        $display("Total tests: %0d, Failures: %0d", total_tests, failures);',
+        "        if (failures == 0)",
+        '            $display("OVERALL PASS");',
+        "        else",
+        '            $display("OVERALL FAIL");',
+        "        $finish;",
+        "    end",
+        "endmodule",
+        "",
+        "// ---- Reference model (written independently of the design) ----",
+        reference_code.strip(),
+        "",
+    ]
+    return "\n".join(lines)

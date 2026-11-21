@@ -10,6 +10,7 @@ from services.generation_pipeline import (
     generate_testbench_for,
 )
 from services.simulation_service import simulate
+from services.schematic_service import render_schematic
 from services import project_service
 
 router = APIRouter()
@@ -31,6 +32,11 @@ class DebugRequest(BaseModel):
     output: str = Field(default="", max_length=20000)
 class TestbenchRequest(BaseModel):
     module_code: str = Field(min_length=1, max_length=50000)
+
+
+class SchematicRequest(BaseModel):
+    module_code: str = Field(min_length=1, max_length=50000)
+    view: str = Field(default="auto", pattern="^(auto|gates|rtl)$")
 
 
 @router.get("/model")
@@ -113,6 +119,12 @@ def debug_code(req: DebugRequest):
 
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+
+@router.post("/schematic")
+def schematic(req: SchematicRequest):
+    """Draw the design as a gate-level or RTL schematic (SVG)."""
+    return render_schematic(req.module_code, req.view)
+
 
 @router.post("/generate-testbench")
 def generate_testbench_code(req: TestbenchRequest):

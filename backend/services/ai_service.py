@@ -371,6 +371,44 @@ def _undriven_outputs(module_code: str) -> list[str]:
     ]
 
 
+def _fix_procedural_outputs(module_code: str) -> tuple[str, list[str]]:
+    """
+    Declare an output as `output reg` when it is assigned inside an always
+    block but declared as a plain output / output wire (the reverse of
+    _fix_assign_to_reg). Only single-name declarations are rewritten.
+    """
+
+    notes = []
+    body = blank_comments(module_code)
+    procedural = re.sub(r"\bassign\b[^;]*;", " ", body)
+    # Names assigned through a concatenation: {cout, sum} = ...
+    concat_targets = {
+        name
+        for group in re.findall(r"\{([^{}]*)\}\s*<?=(?!=)", procedural)
+        for name in re.findall(r"[A-Za-z_]\w*", group)
+    }
+    for decl in list(re.finditer(
+        r"\boutput\s+(?P<wire>wire\s+)?(?P<range>(?:signed\s*)?\[[^\]]*\]\s*)?"
+        r"(?P<name>[A-Za-z_]\w*)\s*(?=[,);])",
+        body,
+    ))[::-1]:
+        name = decl.group("name")
+        if name in ("reg", "wire", "signed"):
+            continue
+        # Assigned with = or <= somewhere outside continuous assigns?
+        if name not in concat_targets and not re.search(
+            rf"\b{name}\s*(?:\[[^\]]*\]\s*)?<?=(?!=)", procedural
+        ):
+            continue
+        if re.search(rf"\bassign\s+{name}\b", body):
+            continue
+        rng = decl.group("range") or ""
+        replacement = f"output reg {rng}{name}"
+        module_code = module_code[:decl.start()] + replacement + module_code[decl.end():]
+        notes.append(f"Declared output '{name}' as reg (assigned in an always block).")
+    return module_code, notes[::-1]
+
+
 def _balance_endmodule(code: str, label: str) -> tuple[str, list[str]]:
     """Append endmodule when a file has more `module` than `endmodule`."""
 

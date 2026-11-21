@@ -29,6 +29,10 @@ from ai.prompts import (
     REFERENCE_MODEL_COMBINATIONAL,
     REFERENCE_MODEL_REPAIR,
     REFERENCE_MODEL_SEQUENTIAL,
+    GOLDEN_MODEL_PROMPT,
+    GOLDEN_REPAIR_PROMPT,
+    GOLDEN_STYLE_FROM_DESIGN,
+    GOLDEN_STYLE_FROM_SPEC,
     fill_prompt,
 )
 from services import ai_service
@@ -37,16 +41,19 @@ from services.ai_service import (
     _balance_endmodule,
     _call_model,
     _fix_assign_to_reg,
+    _fix_procedural_outputs,
     _looks_like_testbench,
     _module_blocks,
     _undriven_outputs,
     clean_verilog,
     is_verilog_source,
 )
-from services.simulation_service import compile_only, simulate
+from services.simulation_service import blank_comments, compile_only, simulate
 from services.testbench_builder import (
     DesignInterface,
+    build_golden_testbench,
     build_testbench,
+    reference_header,
     parse_interface,
     validate_snippets,
 )
@@ -78,6 +85,8 @@ def _tidy_design(code: str, log: list[str]) -> str:
     code, notes = _balance_endmodule(code, "design")
     log.extend(notes)
     code, notes = _fix_assign_to_reg(code)
+    log.extend(notes)
+    code, notes = _fix_procedural_outputs(code)
     log.extend(notes)
     return code
 
@@ -295,6 +304,137 @@ def _reference_model(
     raise RuntimeError("The reference model could not be made to compile.")
 
 
+def _normalized_body(code: str) -> str:
+    """Module text without comments, whitespace and the module name."""
+    body = blank_comments(code)
+    body = re.sub(r"\bmodule\s+[A-Za-z_][\w$]*", "module", body)
+    return re.sub(r"\s+", "", body)
+
+
+def _golden_problems(
+    interface: DesignInterface,
+    module_code: str,
+    reference: str,
+    ref_name: str,
+    locked: bool,
+) -> tuple[str, Optional[str]]:
+    """Check the reference module; return (problems, testbench) ."""
+
+    if not is_verilog_source(reference):
+        return "module_code does not contain a Verilog module.", None
+    ref_interface = parse_interface(reference)
+    if ref_interface is None:
+        return "The module header could not be read; use the header given.", None
+    if _signature(ref_interface) != _signature(interface):
+        expected = ", ".join(f"{d} {n}[{w}]" for n, d, w in _signature(interface))
+        got = ", ".join(f"{d} {n}[{w}]" for n, d, w in _signature(ref_interface))
+        return (
+            "The ports do not match the required header.\n"
+            f"Required: {expected}\nYours:    {got}"
+        ), None
+    undriven = _undriven_outputs(reference)
+    if undriven:
+        return "These outputs are never driven: " + ", ".join(undriven), None
+    if locked and _normalized_body(reference) == _normalized_body(module_code):
+        return (
+            "This is a copy of the design. Write an independent behavioural "
+            "version of the same behaviour (different structure)."
+        ), None
+
+    testbench = build_golden_testbench(interface, reference, ref_name)
+    compiled = compile_only(module_code, testbench, strict=not locked)
+    if not compiled["success"]:
+        return (
+            "The reference module does not compile:\n"
+            + _annotate_errors(compiled["errors"], module_code, testbench)
+        ), None
+    return "", compiled["testbench_code"]
+
+
+def _golden_model(
+    interface: DesignInterface,
+    module_code: str,
+    spec: str,
+    temperature: float,
+    locked: bool,
+    log: list[str],
+) -> dict:
+    """An independently written reference module + the testbench using it."""
+
+    ref_name = f"{interface.module}_ref"
+    header = reference_header(interface, ref_name)
+    reset_note = (
+        f"Reset: {interface.reset.name} is active-"
+        f"{'low' if interface.reset_active_low else 'high'}; it clears the state."
+        if interface.reset else "There is no reset input."
+    )
+    request = fill_prompt(
+        GOLDEN_MODEL_PROMPT,
+        spec=spec,
+        header=header,
+        style=GOLDEN_STYLE_FROM_DESIGN if locked else GOLDEN_STYLE_FROM_SPEC,
+        clock=interface.clock.name if interface.clock else "clk",
+        reset_note=reset_note,
+    )
+    result = _call_model(
+        system_prompt=(
+            "You are a hardware verification engineer writing a reference "
+            "model in Verilog. Return only valid JSON. No Markdown fences."
+        ),
+        user_prompt=request,
+        options=_ollama_options(temperature, 3000),
+        timeout=240,
+        required_fields=["module_code"],
+        optional_fields=["explanation"],
+        task="Reference model",
+    )
+
+    for attempt in range(MODEL_REPAIRS + 1):
+        code = clean_verilog(result["module_code"])
+        code, _ = _balance_endmodule(code, "reference")
+        code, _ = _fix_assign_to_reg(code)
+        code, _ = _fix_procedural_outputs(code)
+        # Keep the required module name even if the model renamed it.
+        code = re.sub(r"\bmodule\s+[A-Za-z_][\w$]*", f"module {ref_name}", code, count=1)
+        problems, testbench = _golden_problems(interface, module_code, code, ref_name, locked)
+        if not problems:
+            return {"testbench_code": testbench, "explanation": result.get("explanation", ""),
+                    "kind": "golden module"}
+        log.append(f"Reference module check: {problems.splitlines()[0][:200]}")
+        if attempt == MODEL_REPAIRS:
+            break
+        result = _call_model(
+            system_prompt="You fix Verilog reference models. Return only valid JSON.",
+            user_prompt=fill_prompt(
+                GOLDEN_REPAIR_PROMPT, problems=problems[-3000:], module_code=code, header=header
+            ),
+            options=_ollama_options(0.1, 3000),
+            timeout=240,
+            required_fields=["module_code"],
+            optional_fields=["explanation"],
+            task="Reference model repair",
+        )
+    raise RuntimeError("The reference module could not be made to work.")
+
+
+def _any_reference(
+    interface: DesignInterface,
+    module_code: str,
+    spec: str,
+    temperature: float,
+    locked: bool,
+    log: list[str],
+) -> dict:
+    """Golden reference module first; expected-value statements as backup."""
+    try:
+        return _golden_model(interface, module_code, spec, temperature, locked, log)
+    except RuntimeError as exc:
+        log.append(f"{exc} Trying expected-value statements instead.")
+        model = _reference_model(interface, module_code, spec, temperature, locked, log)
+        model["kind"] = "expected-value statements"
+        return model
+
+
 def _signature(interface: DesignInterface) -> tuple:
     return tuple((p.name, p.direction, p.width) for p in interface.ports)
 
@@ -358,7 +498,7 @@ def generate_design_and_testbench(description: str) -> dict:
         return _legacy_generate(description, log)
 
     try:
-        model = _reference_model(interface, design["module_code"], spec, 0.2, False, log)
+        model = _any_reference(interface, design["module_code"], spec, 0.2, False, log)
     except RuntimeError as exc:
         log.append(f"Reference model failed: {exc}")
         return _legacy_generate(description, log)
@@ -392,7 +532,7 @@ def generate_design_and_testbench(description: str) -> dict:
             _check_supported(fresh_interface)
             fresh_model = model
             if _signature(fresh_interface) != _signature(interface):
-                fresh_model = _reference_model(
+                fresh_model = _any_reference(
                     fresh_interface, fresh["module_code"], spec, 0.2, False, log
                 )
             run(fresh, fresh_model, "fresh design vs reference model")
@@ -404,13 +544,24 @@ def generate_design_and_testbench(description: str) -> dict:
     if best["sim"].get("verdict") != "PASS" and attempts < max_attempts:
         try:
             best_interface = parse_interface(best["design"]["module_code"])
-            fresh_model = _reference_model(
+            fresh_model = _any_reference(
                 best_interface, best["design"]["module_code"], spec, 0.6, False, log
             )
             run(best["design"], fresh_model, "best design vs fresh reference model")
         except RuntimeError as exc:
             log.append(f"Fresh reference model failed: {exc}")
         best = min(candidates, key=lambda c: _score(c["sim"]))
+
+    if best["sim"].get("verdict") not in ("PASS", "FAIL"):
+        verification = _verification(best["sim"], attempts, log, independent=True)
+        verification["gave_up"] = True
+        verification["message"] = GAVE_UP_MESSAGE.format(model=config.model_label())
+        return {
+            "module_code": best["design"]["module_code"],
+            "testbench_code": best["model"]["testbench_code"],
+            "explanation": best["design"]["explanation"] or "",
+            "verification": verification,
+        }
 
     if best["sim"].get("verdict") == "FAIL":
         log.append(
@@ -465,7 +616,7 @@ def generate_testbench_for(module_code: str) -> dict:
         "(read it as the specification):\n" + module_code
     )
     try:
-        model = _reference_model(interface, module_code, spec, 0.1, True, log)
+        model = _any_reference(interface, module_code, spec, 0.1, True, log)
     except RuntimeError as exc:
         result = ai_service.generate_testbench(module_code)
         result["verification"]["log"] = [
@@ -478,7 +629,7 @@ def generate_testbench_for(module_code: str) -> dict:
 
     if sim.get("verdict") != "PASS" and config.MAX_GENERATION_ATTEMPTS > 1:
         try:
-            second = _reference_model(interface, module_code, spec, 0.6, True, log)
+            second = _any_reference(interface, module_code, spec, 0.6, True, log)
             second_sim = simulate(module_code=module_code, testbench_code=second["testbench_code"])
             attempts = 2
             log.append(f"Attempt 2 (fresh reference model): {second_sim.get('verdict')}")
@@ -487,6 +638,14 @@ def generate_testbench_for(module_code: str) -> dict:
         except RuntimeError as exc:
             log.append(f"Fresh reference model failed: {exc}")
 
+    if sim.get("verdict") == "FAIL":
+        log.append(
+            "The reference is the AI's own re-implementation of your design. "
+            "A FAIL means the two disagree: either your design has a bug or "
+            "the AI misunderstood it. Check the FAIL lines (inputs, expected, "
+            "got) against what your design should do."
+        )
+
     return {
         "testbench_code": model["testbench_code"],
         "explanation": model.get("explanation") or "Self-checking testbench generated.",
@@ -494,9 +653,37 @@ def generate_testbench_for(module_code: str) -> dict:
     }
 
 
+GAVE_UP_MESSAGE = (
+    "{model} could not produce a working design for this circuit after "
+    "several attempts. Try describing the ports and behaviour more "
+    "precisely, or switch to a more capable model (see README: Choosing "
+    "the AI model)."
+)
+
+
 def _legacy_generate(description: str, log: list[str]) -> dict:
-    result = ai_service.generate_verilog(description)
-    result["verification"]["log"] = log + result["verification"]["log"]
-    result["verification"]["method"] = "free-form"
-    result["verification"]["model"] = config.model_label()
+    try:
+        result = ai_service.generate_verilog(description)
+    except RuntimeError as exc:
+        log.append(f"Free-form generation failed: {exc}")
+        return {
+            "module_code": "",
+            "testbench_code": "",
+            "explanation": "",
+            "verification": {
+                "compiled": False, "ready": False, "verdict": None,
+                "repair_attempts": 0, "attempts": 0, "problems": str(exc),
+                "log": log, "method": "free-form", "model": config.model_label(),
+                "gave_up": True,
+                "message": GAVE_UP_MESSAGE.format(model=config.model_label()),
+            },
+        }
+    verification = result["verification"]
+    verification["log"] = log + verification["log"]
+    verification["method"] = "free-form"
+    verification["model"] = config.model_label()
+    if not verification.get("ready"):
+        # Every route failed: say so instead of presenting broken code.
+        verification["gave_up"] = True
+        verification["message"] = GAVE_UP_MESSAGE.format(model=config.model_label())
     return result
