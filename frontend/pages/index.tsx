@@ -861,6 +861,11 @@ export default function Home() {
   // AI can be switched off on the server (no provider or key configured).
   const [aiEnabled, setAiEnabled] = useState(true);
   const [aiOffReason, setAiOffReason] = useState("");
+  // Result of the last Generate, shown right under the Generate button.
+  const [generateStatus, setGenerateStatus] = useState<
+    { tone: "pass" | "fail"; text: string } | null
+  >(null);
+  const [generateSeconds, setGenerateSeconds] = useState(0);
   const [unlocking, setUnlocking] = useState(false);
   const [unlockError, setUnlockError] = useState("");
   const [schematic, setSchematic] = useState<Schematic | null>(null);
@@ -1185,9 +1190,21 @@ export default function Home() {
     }
   };
 
+  // Elapsed-time counter while Generate runs (free tiers can take a minute).
+  useEffect(() => {
+    if (!loading) return;
+    setGenerateSeconds(0);
+    const started = Date.now();
+    const timer = window.setInterval(
+      () => setGenerateSeconds(Math.round((Date.now() - started) / 1000)),
+      1000
+    );
+    return () => window.clearInterval(timer);
+  }, [loading]);
+
   const generateCode = async () => {
     if (!prompt.trim()) {
-      setOutput("Please enter a circuit description.");
+      setGenerateStatus({ tone: "fail", text: "Enter a circuit description first." });
       return;
     }
     if (
@@ -1199,6 +1216,7 @@ export default function Home() {
       return;
     }
     setLoading(true);
+    setGenerateStatus(null);
     resetResults();
     setTestbenchExplanation("");
     setTestbenchError("");
@@ -1218,17 +1236,25 @@ export default function Home() {
             data.module_code || "",
           ].join("\n")
         );
+        setGenerateStatus({
+          tone: "fail",
+          text: data.verification.message || "The model could not produce a working design.",
+        });
         return;
       }
-      setModuleCode(data.module_code || data.code || "");
-      setTestbenchCode(data.testbench_code || "");
+      const newModule = data.module_code || data.code || "";
+      const newTestbench = data.testbench_code || "";
+      setModuleCode(newModule);
+      setTestbenchCode(newTestbench);
       setExplanation(data.explanation || "");
       // A newly generated design does not belong to any opened file, so
-      // unlink both editors to stop Save from overwriting them.
+      // unlink both editors to stop Save from overwriting them. The generated
+      // code is the clean baseline: only later edits count as unsaved, so the
+      // next Generate does not ask about changes the user never made.
       setModuleFile("");
       setTestbenchFile("");
-      setModuleSaved("");
-      setTestbenchSaved("");
+      setModuleSaved(newModule);
+      setTestbenchSaved(newTestbench);
       setOutput(
         ["Verilog module and testbench generated.", describeVerification(data.verification)]
           .filter(Boolean)
@@ -1237,12 +1263,27 @@ export default function Home() {
       if (data.verification?.compiled !== false && (data.module_code || data.code)) {
         void drawSchematic("auto", data.module_code || data.code);
       }
-    } catch (error: any) {
-      setOutput(
-        error.response?.data?.detail ||
-          error.message ||
-          "Failed to generate Verilog."
+      const v = data.verification;
+      setGenerateStatus(
+        v?.verdict === "PASS"
+          ? { tone: "pass", text: `Generated and verified: all ${v.total_tests} tests pass.` }
+          : v?.verdict === "FAIL"
+            ? {
+                tone: "fail",
+                text: `Generated, but ${v.failures} of ${v.total_tests} tests fail. Check the FAIL lines in Output.`,
+              }
+            : v && !v.ready
+              ? { tone: "fail", text: "Generated, but the code still has problems. See Output." }
+              : { tone: "pass", text: "Generated." }
       );
+    } catch (error: any) {
+      const message =
+        error.response?.data?.detail?.toString() ||
+        (error.response
+          ? `The server answered with an error (${error.response.status}).`
+          : "The server could not be reached. If it was idle, it may be waking up: try again in a minute.");
+      setOutput(message);
+      setGenerateStatus({ tone: "fail", text: message });
     } finally {
       setLoading(false);
     }
@@ -1637,10 +1678,36 @@ export default function Home() {
               </p>
               <button onClick={generateCode} disabled={busy} className={btnPrimary}>
                 {loading ? <span className="lf-spinner" /> : null}
-                {loading ? "Generating" : "Generate"}
+                {loading ? `Generating${generateSeconds ? ` ${generateSeconds}s` : ""}` : "Generate"}
                 {!loading && <Icon name="arrow" className="h-3.5 w-3.5" />}
               </button>
             </div>
+            {(loading || generateStatus) && (
+              <div
+                role="status"
+                className={`flex flex-wrap items-start justify-between gap-2 border-t border-line px-4 py-2.5 text-xs leading-5 ${
+                  loading ? "text-fg-muted" : generateStatus?.tone === "pass" ? "text-pass" : "text-fail"
+                }`}
+              >
+                <span className="min-w-0 whitespace-pre-wrap">
+                  {loading
+                    ? generateSeconds < 20
+                      ? "Generating and checking the design…"
+                      : "Still working: the free AI tier and server can take up to a minute or two."
+                    : generateStatus?.text}
+                </span>
+                {!loading && output && (
+                  <button
+                    onClick={() =>
+                      document.getElementById("output-panel")?.scrollIntoView({ behavior: "smooth", block: "start" })
+                    }
+                    className="shrink-0 text-fg-muted underline-offset-2 hover:text-fg hover:underline"
+                  >
+                    Show output ↓
+                  </button>
+                )}
+              </div>
+            )}
             {!moduleCode.trim() && (
               <div className="flex flex-wrap items-center gap-1.5 border-t border-line px-4 py-2.5">
                 <span className="mr-1 text-xs text-fg-subtle">Try</span>
@@ -1886,7 +1953,7 @@ export default function Home() {
 
           {/* ---------------- Output ---------------- */}
           {output && (
-            <section className={panel}>
+            <section id="output-panel" className={`${panel} scroll-mt-16`}>
               <PanelHeader title="Output">
                 {verdictBadge && (
                   <span

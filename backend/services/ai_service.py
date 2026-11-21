@@ -35,6 +35,14 @@ CODE_START = re.compile(r"^\s*(module\b|`|//|/\*|\(\*)")
 MODULE_NAME = re.compile(r"\bmodule\s+([A-Za-z_][\w$]*)")
 
 
+class AIProviderError(RuntimeError):
+    """
+    The AI provider itself failed: unreachable, key rejected, rate limited,
+    unknown model or timed out. Retrying with another prompt cannot help, so
+    the pipeline reports these directly instead of trying fallbacks.
+    """
+
+
 def clean_verilog(code: str) -> str:
     """
     Remove Markdown code fences and leading prose from generated Verilog.
@@ -100,21 +108,21 @@ def _ollama_request(
 
     except urllib.error.HTTPError as exc:
         error_details = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
+        raise AIProviderError(
             f"Ollama HTTP error {exc.code}: {error_details}"
         ) from exc
 
     except urllib.error.URLError as exc:
         if isinstance(exc.reason, TimeoutError):
-            raise RuntimeError(
+            raise AIProviderError(
                 f"{task} timed out. Please try again."
             ) from exc
-        raise RuntimeError(
+        raise AIProviderError(
             "Cannot connect to Ollama. Make sure Ollama is running."
         ) from exc
 
     except TimeoutError as exc:
-        raise RuntimeError(f"{task} timed out. Please try again.") from exc
+        raise AIProviderError(f"{task} timed out. Please try again.") from exc
 
     try:
         response_data = json.loads(raw_body)
@@ -514,23 +522,23 @@ def _anthropic_request(
         else:
             response = _anthropic_client.messages.create(**request)
     except anthropic.AuthenticationError as exc:
-        raise RuntimeError(
+        raise AIProviderError(
             "Claude API credentials are missing or invalid. Set "
             "ANTHROPIC_API_KEY in backend/.env and restart the backend."
         ) from exc
     except anthropic.PermissionDeniedError as exc:
-        raise RuntimeError("This Claude API key cannot use the configured model.") from exc
+        raise AIProviderError("This Claude API key cannot use the configured model.") from exc
     except anthropic.NotFoundError as exc:
-        raise RuntimeError(
+        raise AIProviderError(
             f"Claude model {config.ANTHROPIC_MODEL!r} was not found. "
             "Check LOGICFORGE_ANTHROPIC_MODEL."
         ) from exc
     except anthropic.RateLimitError as exc:
-        raise RuntimeError("The Claude API rate limit was reached. Try again shortly.") from exc
+        raise AIProviderError("The Claude API rate limit was reached. Try again shortly.") from exc
     except anthropic.APIStatusError as exc:
-        raise RuntimeError(f"Claude API error {exc.status_code}: {exc.message}") from exc
+        raise AIProviderError(f"Claude API error {exc.status_code}: {exc.message}") from exc
     except anthropic.APIConnectionError as exc:
-        raise RuntimeError("Cannot reach the Claude API. Check your internet connection.") from exc
+        raise AIProviderError("Cannot reach the Claude API. Check your internet connection.") from exc
 
     if response.stop_reason == "refusal":
         raise RuntimeError(f"Claude declined the {task.lower()} request.")
@@ -547,7 +555,7 @@ def _anthropic_request(
     return result
 
 
-class AIDisabledError(RuntimeError):
+class AIDisabledError(AIProviderError):
     """AI features are switched off on this server (no provider / no key)."""
 
 
@@ -633,25 +641,25 @@ def _openai_compatible_request(
                     time.sleep(wait)
                     continue
             if exc.code == 429:
-                raise RuntimeError(
+                raise AIProviderError(
                     f"The {provider} free-tier rate limit was reached. Wait a minute and try again."
                 ) from exc
             if exc.code in (401, 403):
-                raise RuntimeError(
+                raise AIProviderError(
                     f"The {provider} API key was rejected. Check LOGICFORGE_AI_API_KEY."
                 ) from exc
             if exc.code == 404:
-                raise RuntimeError(
+                raise AIProviderError(
                     f"{provider} does not offer the model {config.AI_MODEL!r}. Set "
                     "LOGICFORGE_AI_MODEL to a model from the provider's model list."
                 ) from exc
-            raise RuntimeError(f"{provider} API error {exc.code}: {detail}") from exc
+            raise AIProviderError(f"{provider} API error {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             if isinstance(exc.reason, TimeoutError):
-                raise RuntimeError(f"{task} timed out. Please try again.") from exc
-            raise RuntimeError(f"Cannot reach the {provider} API.") from exc
+                raise AIProviderError(f"{task} timed out. Please try again.") from exc
+            raise AIProviderError(f"Cannot reach the {provider} API.") from exc
         except TimeoutError as exc:
-            raise RuntimeError(f"{task} timed out. Please try again.") from exc
+            raise AIProviderError(f"{task} timed out. Please try again.") from exc
 
     try:
         content = body["choices"][0]["message"]["content"] or ""
@@ -1135,6 +1143,8 @@ def verify_and_repair(
                 module_code, testbench_code, check["problems"], module_locked
             )
         except RuntimeError as exc:
+            if isinstance(exc, AIProviderError):
+                raise
             log.append(f"Attempt {attempts} failed: {exc}")
             continue
 
@@ -1175,6 +1185,8 @@ def _with_retry(request: Callable[[float], dict]) -> dict:
     try:
         return request(0.2)
     except RuntimeError as exc:
+        if isinstance(exc, AIProviderError):
+            raise
         message = str(exc)
         if "malformed JSON" not in message and "missing a valid" not in message \
                 and "empty response" not in message:

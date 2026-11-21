@@ -191,3 +191,35 @@ def test_debug_fixes_known_testbench_mistakes_without_ai(scripted_model, up_coun
     assert result["testbench_changed"] and not result["module_changed"]
     assert result["verification"]["verdict"] == "PASS"
     assert "reg [3:0] expected_count;" in result["fixed_testbench_code"]
+
+
+# ---------------------------------------------------------------- provider errors
+
+def test_provider_errors_are_reported_directly(scripted_model):
+    """A rejected key / unreachable API is not a model failure: no fallbacks."""
+    error = ai_service.AIProviderError("The Groq API key was rejected. Check LOGICFORGE_AI_API_KEY.")
+    model = scripted_model({"Design generation": [error]})
+    with pytest.raises(ai_service.AIProviderError, match="key was rejected"):
+        pipeline.generate_design_and_testbench("full adder")
+    assert model.calls == ["Design generation"]  # no retries, no free-form fallback
+
+
+def test_provider_error_during_reference_is_reported(scripted_model):
+    scripted_model({
+        "Design generation": [design(FULL_ADDER)],
+        "Reference model": [ai_service.AIProviderError("The Groq free-tier rate limit was reached.")],
+    })
+    with pytest.raises(ai_service.AIProviderError, match="rate limit"):
+        pipeline.generate_design_and_testbench("full adder")
+
+
+def test_provider_error_reaches_the_user_as_502(scripted_model):
+    from fastapi.testclient import TestClient
+    import main
+    from api.security import limiter
+
+    limiter.reset()
+    scripted_model({"Design generation": [ai_service.AIProviderError("Cannot reach the Groq API.")]})
+    response = TestClient(main.app).post("/generate", json={"prompt": "full adder"})
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Cannot reach the Groq API."

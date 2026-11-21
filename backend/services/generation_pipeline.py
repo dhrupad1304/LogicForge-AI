@@ -37,6 +37,7 @@ from ai.prompts import (
 )
 from services import ai_service
 from services.ai_service import (
+    AIProviderError,
     _annotate_errors,
     _balance_endmodule,
     _call_model,
@@ -429,6 +430,8 @@ def _any_reference(
     try:
         return _golden_model(interface, module_code, spec, temperature, locked, log)
     except RuntimeError as exc:
+        if isinstance(exc, AIProviderError):
+            raise
         log.append(f"{exc} Trying expected-value statements instead.")
         model = _reference_model(interface, module_code, spec, temperature, locked, log)
         model["kind"] = "expected-value statements"
@@ -494,12 +497,16 @@ def generate_design_and_testbench(description: str) -> dict:
         log.append(f"Template not used ({reason}); used free-form generation.")
         return _legacy_generate(description, log)
     except RuntimeError as exc:
+        if isinstance(exc, AIProviderError):
+            raise
         log.append(f"First design failed: {exc}")
         return _legacy_generate(description, log)
 
     try:
         model = _any_reference(interface, design["module_code"], spec, 0.2, False, log)
     except RuntimeError as exc:
+        if isinstance(exc, AIProviderError):
+            raise
         log.append(f"Reference model failed: {exc}")
         return _legacy_generate(description, log)
     candidates = []
@@ -549,6 +556,8 @@ def generate_design_and_testbench(description: str) -> dict:
             )
             run(best["design"], fresh_model, "best design vs fresh reference model")
         except RuntimeError as exc:
+            if isinstance(exc, AIProviderError):
+                raise
             log.append(f"Fresh reference model failed: {exc}")
         best = min(candidates, key=lambda c: _score(c["sim"]))
 
@@ -618,6 +627,8 @@ def generate_testbench_for(module_code: str) -> dict:
     try:
         model = _any_reference(interface, module_code, spec, 0.1, True, log)
     except RuntimeError as exc:
+        if isinstance(exc, AIProviderError):
+            raise
         result = ai_service.generate_testbench(module_code)
         result["verification"]["log"] = [
             f"Reference model failed ({exc}); used free-form generation."
@@ -636,6 +647,8 @@ def generate_testbench_for(module_code: str) -> dict:
             if _score(second_sim) < _score(sim):
                 model, sim = second, second_sim
         except RuntimeError as exc:
+            if isinstance(exc, AIProviderError):
+                raise
             log.append(f"Fresh reference model failed: {exc}")
 
     if sim.get("verdict") == "FAIL":
@@ -665,6 +678,8 @@ def _legacy_generate(description: str, log: list[str]) -> dict:
     try:
         result = ai_service.generate_verilog(description)
     except RuntimeError as exc:
+        if isinstance(exc, AIProviderError):
+            raise
         log.append(f"Free-form generation failed: {exc}")
         return {
             "module_code": "",
