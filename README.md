@@ -1,92 +1,215 @@
+<div align="center">
+
 # LogicForge AI
 
-AI-powered Verilog generator + simulator.
+**Describe a digital circuit in plain English. Get Verilog that is compiled, simulated and verified, with a waveform and a schematic.**
+
+[![Live demo](https://img.shields.io/badge/Live%20demo-logic--forge--ai.vercel.app-f0a43a?style=for-the-badge)](https://logic-forge-ai.vercel.app)
+
+![Next.js](https://img.shields.io/badge/Next.js-16-111?logo=nextdotjs)
+![FastAPI](https://img.shields.io/badge/FastAPI-Python-009688?logo=fastapi&logoColor=white)
+![Icarus Verilog](https://img.shields.io/badge/Simulation-Icarus%20Verilog-555)
+![Yosys](https://img.shields.io/badge/Schematics-Yosys-555)
+![Tests](https://img.shields.io/badge/tests-146%20passing-5cc38f)
+
+</div>
+
+> **Live demo:** [logic-forge-ai.vercel.app](https://logic-forge-ai.vercel.app). The hosted
+> version is password-protected because it runs simulations and AI requests on a
+> shared server; ask the author for access, or [run it locally](#run-it-locally) in a few minutes.
+
+![Generating a full adder: the design and its self-checking testbench, verified](docs/screenshots/generate.webp)
+
+---
+
+## What it does
+
+Type *"full adder"* and press **Generate**. LogicForge:
+
+1. **Writes the Verilog design** with an AI model and compiles it with Icarus Verilog.
+2. **Builds a self-checking testbench** for it: every input combination, or
+   random vectors for wide inputs, plus clock and reset for sequential circuits.
+3. **Simulates the two against each other** and reports a real
+   **PASS / FAIL** for every test case, never a guess.
+4. **Shows the waveform** of every signal and **draws the circuit** as a
+   gate-level or RTL schematic.
+
+You can also open or paste your own Verilog and use the simulator, the
+waveform viewer, the schematic and **Debug & fix** without any AI at all.
+
+| Simulation results | Waveform |
+|---|---|
+| ![Simulation output: 8 PASS lines and OVERALL PASS](docs/screenshots/simulation.webp) | ![Waveform of the full adder's inputs and outputs](docs/screenshots/waveform.webp) |
+
+**Gate-level schematic**, drawn automatically from the design with Yosys:
+
+![Gate-level schematic of the full adder: two XOR, three AND and two OR gates](docs/screenshots/schematic.webp)
 
 ## Features
-- Natural language → Verilog module and self-checking testbench
-- AI testbench generation and AI debugging of failed simulations
-- Simulation using Icarus Verilog, with a built-in waveform viewer
-- Circuit schematics: gate-level (AND/OR/XOR/MUX, flip-flops) or RTL blocks,
-  drawn from the design with Yosys
-- Workspace file explorer and Monaco editor UI
 
-## Requirements
-- Python 3.10+
-- Node.js 20.12+
-- [Icarus Verilog](https://steveicarus.github.io/iverilog/) (`iverilog` and `vvp` on your PATH),
-  e.g. `brew install icarus-verilog`
-- [Yosys](https://yosyshq.net/yosys/) for schematics: `brew install yosys`
-- [Ollama](https://ollama.com) running locally with the model used by the backend:
-  `ollama pull qwen2.5-coder:3b`
+- **Natural language → verified Verilog**: design, testbench and verdict in one click.
+- **Honest verification**: the testbench compares the design with an
+  independently written reference model, so a PASS means two separate
+  implementations agree. A testbench that runs no tests or prints no summary
+  is never reported as a pass.
+- **Automatic repair**: common mistakes (`assign` to a `reg`, width
+  mismatches, a missing clock or `endmodule`, …) are fixed in code; whatever
+  is left goes back to the AI with the exact compiler error and line.
+- **Debug & fix**: finds the root cause of a failing simulation and proposes
+  a corrected design or testbench, and never pastes prose into your editors.
+- **Waveform viewer**: fits the whole run to the panel, zooms to 64×, buses in hex.
+- **Schematics**: gate view (AND/OR/XOR/MUX gates and flip-flops) or RTL view
+  (adders, comparators, muxes, registers), with SVG download.
+- **Workspace**: a file explorer for `.v` / `.sv` / `.txt` files and Monaco editors.
+- **Bring your own AI**: local Ollama, free cloud tiers (Groq, Gemini,
+  OpenRouter), Claude, or AI switched off.
 
-## Run
+## How verification works
 
-### Backend (http://localhost:8000)
+```mermaid
+flowchart LR
+    A["Your description"] --> B["AI writes the design"]
+    B --> C{"Compiles?<br/>(Icarus, Verilog-2005)"}
+    C -- no --> D["Fix in code,<br/>then AI repair"] --> C
+    C -- yes --> E["Testbench built in code<br/>from the design's ports"]
+    A --> F["AI writes a reference model<br/>(separate request, never sees the design)"]
+    F --> E
+    E --> G["Simulate"]
+    G --> H{"Design and reference agree?"}
+    H -- yes --> I["PASS"]
+    H -- no --> J["Retry: fresh design,<br/>then fresh reference"] --> G
+    J -. still disagree .-> K["Honest FAIL with the<br/>exact failing inputs"]
+```
+
+The testbench structure (declarations, stimulus, clock/reset, comparisons,
+summary) is generated by code, not by the AI, so it is correct by
+construction. The AI only writes the two things that need understanding: the
+design and an independent reference model of it.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 16, React 19, Tailwind CSS 4, Monaco Editor, Geist fonts |
+| Backend | Python, FastAPI |
+| Simulation | Icarus Verilog (`iverilog`, `vvp`) |
+| Schematics | Yosys synthesis + netlistsvg |
+| AI | Ollama, Groq / Gemini / OpenRouter (OpenAI-compatible), Anthropic Claude |
+| Hosting | Vercel (frontend), Render with Docker (backend) |
+| Tests | pytest: 146 tests, about 4 seconds |
+
+## Run it locally
+
+**Requirements:** Python 3.10+, Node.js 20.12+, and on macOS:
+
+```bash
+brew install icarus-verilog yosys
+```
+
+For local AI (optional), install [Ollama](https://ollama.com) and pull a model:
+
+```bash
+ollama pull qwen2.5-coder:3b
+```
+
+**Backend** (http://localhost:8000):
+
 ```bash
 cd backend
 pip install -r requirements.txt
-npm install          # netlistsvg, used to draw schematics
+npm install
 uvicorn main:app --reload
 ```
 
-The API only accepts requests from the frontend at `http://localhost:3000`
-(and `127.0.0.1:3000`). To allow other origins, set
-`LOGICFORGE_ALLOWED_ORIGINS` to a comma-separated list.
+**Frontend** (http://localhost:3000), in a second terminal:
 
-### Frontend (http://localhost:3000)
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-## Deployment
-Frontend on Vercel, backend on Render (Docker). Step-by-step guide:
-[DEPLOY.md](DEPLOY.md).
-
-## How generation is verified
-1. The AI writes the **design** only. It is compile-checked with Icarus
-   Verilog (Verilog-2005 rules), common mistakes are fixed in code, and the
-   AI repairs whatever is left.
-2. The **testbench is built in code** from the design's ports: declarations,
-   stimulus (all input combinations, or random vectors for wide inputs),
-   clock and reset, comparisons and the PASS/FAIL summary.
-3. In a **separate request**, the AI writes only the expected-value logic
-   (a reference model) from your description and the port list. It never
-   sees the design's code, so a PASS means two independent versions agree.
-4. On FAIL, it tries a fresh design, then a fresh reference model, and keeps
-   the pair that agrees (or reports the closest one honestly).
+Open http://localhost:3000 and click one of the example prompts.
 
 ## Choosing the AI model
-Copy `backend/.env.example` to `backend/.env` and set:
-- `LOGICFORGE_AI_PROVIDER=ollama` (default) with `LOGICFORGE_OLLAMA_MODEL`
-  for a local model, or
-- `LOGICFORGE_AI_PROVIDER=groq` / `gemini` / `openrouter` with a free
-  `LOGICFORGE_AI_API_KEY` for a larger free cloud model, or
-- `LOGICFORGE_AI_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` to use Claude
-  (best on FSMs, ALUs and protocols; billed per use), or
-- `LOGICFORGE_AI_PROVIDER=none` to switch AI off (simulation, waveforms and
-  schematics keep working).
 
-Restart the backend after changing it. The active model is shown in the
-top-right corner of the app.
+Copy `backend/.env.example` to `backend/.env`, set `LOGICFORGE_AI_PROVIDER`,
+and restart the backend. The active model is shown in the app's top-right corner.
+
+| Provider | Setting | Cost | Notes |
+|---|---|---|---|
+| Ollama | `ollama` (default) | Free, offline | Quality depends on the local model you pull |
+| Groq | `groq` + `LOGICFORGE_AI_API_KEY` | Free tier | Large open models, very fast |
+| Google Gemini | `gemini` + `LOGICFORGE_AI_API_KEY` | Free tier | |
+| OpenRouter | `openrouter` + `LOGICFORGE_AI_API_KEY` | Free `:free` models | |
+| Claude | `anthropic` + `ANTHROPIC_API_KEY` | Paid | Best for FSMs, ALUs and protocols |
+| Off | `none` | Free | Simulation, waveforms and schematics still work |
+
+A cloud provider without a key switches AI off automatically instead of failing.
+
+## Deployment
+
+The live demo runs the frontend on **Vercel** and the backend on **Render**
+(Docker, since it needs Icarus Verilog and Yosys), entirely on free plans.
+The deployed backend adds a shared access password, per-visitor rate limits
+and resource limits on every simulation. Step-by-step guide: **[DEPLOY.md](DEPLOY.md)**.
 
 ## Tests
+
 ```bash
 cd backend
 pip install -r requirements-dev.txt
 python3 -m pytest
 ```
-The suite (about 110 tests, a few seconds) covers simulation and verdicts,
-the template and golden-model testbenches, the automatic code fixes, the
-generation pipeline and Debug & Fix (with the AI replaced by a scripted
-stub, so no model is called), the HTTP API and schematics. Tests that need
-Icarus Verilog or Yosys are skipped when those tools are missing.
 
-## Notes
-- Workspace files are stored in `backend/workspace/` (not committed to git).
-- Simulations reject Verilog that accesses host files (`$fopen`,
-  `$readmemh`/`$readmemb`, `$writememh`/`$writememb`, `` `include ``, and
-  `$dumpfile` with a path).
-- `backend/server.js` is an older OpenAI-based server that is not used by the
-  frontend. It runs on port 8001 and reads `OPENAI_API_KEY` from `backend/.env`.
+146 tests run in about 4 seconds without calling any AI model (a scripted
+stub stands in for it). They cover simulation and verdicts, the testbench
+builders, the automatic code fixes, the generation pipeline, Debug & fix,
+the free AI providers and AI-off mode, the HTTP API, security (password,
+rate limits, CORS) and schematics. Tests that need Icarus Verilog or Yosys
+are skipped when those tools are not installed.
+
+## Project structure
+
+```
+backend/
+  main.py                  FastAPI app, CORS, security middleware
+  config.py                settings (AI provider, password, rate limits)
+  api/                     routes and security (password, rate limiting)
+  ai/prompts.py            prompts for design, reference model and repair
+  services/
+    generation_pipeline.py design → testbench → verify → retry
+    testbench_builder.py   port parsing and testbench generation
+    simulation_service.py  Icarus compile / simulate, verdicts, sandboxing
+    schematic_service.py   Yosys + netlistsvg schematics
+    ai_service.py          AI providers, automatic fixes, Debug & fix
+  tests/                   pytest suite and Verilog fixtures
+  Dockerfile               backend image for Render or any Docker host
+frontend/
+  pages/index.tsx          the workbench UI
+  utils/api.ts             API client (backend URL, access password)
+docs/screenshots/          images used in this README
+render.yaml                Render blueprint
+DEPLOY.md                  deployment guide
+```
+
+## Limitations
+
+- **Generation quality depends on the model.** Small local models handle
+  gates, adders, multiplexers, counters and flip-flops well; complex designs
+  (FSMs, UARTs, ALUs) need a larger model such as a free Groq model or Claude.
+  Verification always tells you honestly whether the result works.
+- **Ambiguous descriptions** (e.g. which way a shift register shifts) can
+  make the design and the reference disagree. Be specific about ports and behaviour.
+- **Hosted demo on free plans:** the backend sleeps when idle (the first
+  request takes about a minute) and files saved in the workspace are temporary.
+
+## Security notes
+
+- Verilog that reads or writes host files (`$fopen`, `$readmemh`,
+  `$writememh`, `` `include ``, `$system`, `$dumpfile` with a path) is
+  rejected before simulation.
+- Every Icarus / Yosys run has CPU-time, file-size and memory limits, and the
+  container runs as an unprivileged user.
+- The API accepts requests only from configured frontend origins and, when
+  deployed, only with the access password.
