@@ -63,6 +63,18 @@ Copy `backend/.env.example` to `backend/.env` and set:
 Restart the backend after changing it. The active model is shown in the
 top-right corner of the app.
 
+## Tests
+```bash
+cd backend
+pip install -r requirements-dev.txt
+python3 -m pytest
+```
+The suite (about 110 tests, a few seconds) covers simulation and verdicts,
+the template and golden-model testbenches, the automatic code fixes, the
+generation pipeline and Debug & Fix (with the AI replaced by a scripted
+stub, so no model is called), the HTTP API and schematics. Tests that need
+Icarus Verilog or Yosys are skipped when those tools are missing.
+
 ## Notes
 - Workspace files are stored in `backend/workspace/` (not committed to git).
 - Simulations reject Verilog that accesses host files (`$fopen`,

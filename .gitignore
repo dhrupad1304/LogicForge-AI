@@ -36,3 +36,6 @@ backend/services/ai_service_openai_backup.py
 
 # User workspace files managed by the app
 backend/workspace/
+
+# Test cache
+.pytest_cache/
