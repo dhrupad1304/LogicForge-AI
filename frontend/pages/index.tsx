@@ -858,6 +858,9 @@ export default function Home() {
   const [simulationVerdict, setSimulationVerdict] = useState<string | null>(null);
   const [modelLabel, setModelLabel] = useState("");
   const [locked, setLocked] = useState(false);
+  // AI can be switched off on the server (no provider or key configured).
+  const [aiEnabled, setAiEnabled] = useState(true);
+  const [aiOffReason, setAiOffReason] = useState("");
   const [unlocking, setUnlocking] = useState(false);
   const [unlockError, setUnlockError] = useState("");
   const [schematic, setSchematic] = useState<Schematic | null>(null);
@@ -945,7 +948,11 @@ export default function Home() {
   const loadWorkspace = () => {
     void loadProjectFiles("");
     API.get("/model")
-      .then((response) => setModelLabel(response.data?.label || ""))
+      .then((response) => {
+        setModelLabel(response.data?.label || "");
+        setAiEnabled(response.data?.ai_enabled !== false);
+        setAiOffReason(response.data?.ai_disabled_reason || "");
+      })
       .catch(() => setModelLabel(""));
   };
 
@@ -1588,6 +1595,20 @@ export default function Home() {
 
         <div className="min-w-0 space-y-5">
           {/* ---------------- Prompt composer ---------------- */}
+          {!aiEnabled && (
+            <section className={`${panel} flex items-start gap-3 px-4 py-3`}>
+              <Icon name="chip" className="mt-0.5 h-4 w-4 text-fg-subtle" />
+              <div className="text-xs leading-5">
+                <p className="font-medium text-fg">{aiOffReason || "AI features are turned off."}</p>
+                <p className="text-fg-muted">
+                  You can still write or open Verilog, run simulations, view waveforms
+                  and draw schematics. Generate, Generate testbench and Debug &amp; fix
+                  need an AI provider (see DEPLOY.md).
+                </p>
+              </div>
+            </section>
+          )}
+          {aiEnabled && (
           <section className={`${panel} focus-within:border-accent/40`}>
             <label htmlFor="circuit-prompt" className="sr-only">
               Circuit description
@@ -1642,6 +1663,7 @@ export default function Home() {
               </div>
             )}
           </section>
+          )}
 
           {/* ---------------- Editors ---------------- */}
           <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
@@ -1668,7 +1690,11 @@ export default function Home() {
                 {!moduleCode && (
                   <EditorHint
                     title="No design yet"
-                    body="Describe a circuit above and press Generate, open a .v file from Files, or start typing here."
+                    body={
+                      aiEnabled
+                        ? "Describe a circuit above and press Generate, open a .v file from Files, or start typing here."
+                        : "Open a .v file from Files, or paste or type your Verilog here."
+                    }
                   />
                 )}
                 <Editor
@@ -1691,7 +1717,7 @@ export default function Home() {
               >
                 <button
                   onClick={generateTestbench}
-                  disabled={busy || !moduleCode.trim()}
+                  disabled={busy || !moduleCode.trim() || !aiEnabled}
                   className={btnGhost}
                   title="Write a self-checking testbench for the design"
                 >
@@ -1718,9 +1744,11 @@ export default function Home() {
                   <EditorHint
                     title="No testbench yet"
                     body={
-                      moduleCode.trim()
-                        ? "Press Generate testbench for a self-checking test of your design, or write your own."
-                        : "It is created together with the design, or from any design with Generate testbench."
+                      !aiEnabled
+                        ? "Open a testbench from Files, or paste or write your own here."
+                        : moduleCode.trim()
+                          ? "Press Generate testbench for a self-checking test of your design, or write your own."
+                          : "It is created together with the design, or from any design with Generate testbench."
                     }
                   />
                 )}
@@ -1757,7 +1785,12 @@ export default function Home() {
                 {simulating ? <span className="lf-spinner" /> : <Icon name="play" className="h-3.5 w-3.5" />}
                 {simulating ? "Running" : "Run simulation"}
               </button>
-              <button onClick={debugVerilog} disabled={busy} className={btnSecondary}>
+              <button
+                onClick={debugVerilog}
+                disabled={busy || !aiEnabled}
+                className={btnSecondary}
+                title={aiEnabled ? undefined : aiOffReason || "AI features are turned off."}
+              >
                 {debugging ? <span className="lf-spinner" /> : <Icon name="wrench" className="h-3.5 w-3.5" />}
                 {debugging ? "Analysing" : "Debug & fix"}
               </button>

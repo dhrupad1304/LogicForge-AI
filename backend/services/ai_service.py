@@ -1,6 +1,7 @@
 
 import json
 import re
+import time
 from typing import Callable, Optional
 import urllib.error
 import urllib.request
@@ -546,6 +547,125 @@ def _anthropic_request(
     return result
 
 
+class AIDisabledError(RuntimeError):
+    """AI features are switched off on this server (no provider / no key)."""
+
+
+# Free tiers limit requests per minute: wait this long at most for a slot.
+RATE_LIMIT_MAX_WAIT = 30
+RATE_LIMIT_RETRIES = 2
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Parse a JSON object, tolerating Markdown fences or text around it."""
+    text = text.strip()
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if fenced:
+        text = fenced.group(1).strip()
+    try:
+        value = json.loads(text)
+        return value if isinstance(value, dict) else None
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                value = json.loads(text[start:end + 1])
+                return value if isinstance(value, dict) else None
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def _openai_compatible_request(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    timeout: int,
+    task: str,
+) -> dict:
+    """
+    Chat-completions request to an OpenAI-compatible API (Groq, Gemini,
+    OpenRouter, ...). Asks for JSON mode; retries without it if the provider
+    rejects that option, and waits briefly on free-tier rate limits.
+    """
+
+    provider = config.AI_PROVIDER_NAME or "AI provider"
+    url = f"{config.AI_BASE_URL}/chat/completions"
+    payload = {
+        "model": config.AI_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_object"},
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {config.AI_API_KEY}",
+        # Some providers (OpenRouter) use these to identify the app.
+        "X-Title": "LogicForge",
+    }
+
+    attempts_left = RATE_LIMIT_RETRIES
+    while True:
+        request = urllib.request.Request(
+            url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            if exc.code == 400 and "response_format" in payload and (
+                "response_format" in detail or "json" in detail.lower()
+            ):
+                payload.pop("response_format")  # provider/model lacks JSON mode
+                continue
+            if exc.code == 429 and attempts_left > 0:
+                retry_after = exc.headers.get("retry-after", "")
+                wait = float(retry_after) if retry_after.replace(".", "", 1).isdigit() else 10.0
+                if wait <= RATE_LIMIT_MAX_WAIT:
+                    attempts_left -= 1
+                    time.sleep(wait)
+                    continue
+            if exc.code == 429:
+                raise RuntimeError(
+                    f"The {provider} free-tier rate limit was reached. Wait a minute and try again."
+                ) from exc
+            if exc.code in (401, 403):
+                raise RuntimeError(
+                    f"The {provider} API key was rejected. Check LOGICFORGE_AI_API_KEY."
+                ) from exc
+            if exc.code == 404:
+                raise RuntimeError(
+                    f"{provider} does not offer the model {config.AI_MODEL!r}. Set "
+                    "LOGICFORGE_AI_MODEL to a model from the provider's model list."
+                ) from exc
+            raise RuntimeError(f"{provider} API error {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            if isinstance(exc.reason, TimeoutError):
+                raise RuntimeError(f"{task} timed out. Please try again.") from exc
+            raise RuntimeError(f"Cannot reach the {provider} API.") from exc
+        except TimeoutError as exc:
+            raise RuntimeError(f"{task} timed out. Please try again.") from exc
+
+    try:
+        content = body["choices"][0]["message"]["content"] or ""
+        finish = body["choices"][0].get("finish_reason")
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError(f"{provider} returned an unexpected response.") from exc
+
+    result = _extract_json_object(content)
+    if result is None:
+        hint = " The response was cut off." if finish == "length" else ""
+        raise RuntimeError(f"{provider} returned malformed JSON for {task.lower()}.{hint}")
+    return result
+
+
 def _call_model(
     system_prompt: str,
     user_prompt: str,
@@ -564,7 +684,23 @@ def _call_model(
 
     optional_fields = optional_fields or []
 
-    if config.AI_PROVIDER == "anthropic":
+    reason = config.ai_disabled_reason()
+    if reason:
+        raise AIDisabledError(reason)
+
+    if config.AI_PROVIDER in config.OPENAI_COMPATIBLE_PRESETS:
+        result = _openai_compatible_request(
+            system_prompt,
+            user_prompt,
+            temperature=float(options.get("temperature", 0.2)),
+            max_tokens=int(options.get("num_predict") or 4096),
+            timeout=max(timeout, 120),
+            task=task,
+        )
+        for field in required_fields:
+            if not isinstance(result.get(field), str) or not result[field].strip():
+                raise RuntimeError(f"AI response is missing a valid '{field}' field.")
+    elif config.AI_PROVIDER == "anthropic":
         # Sampling options (temperature, num_ctx, ...) are Ollama-only.
         result = _anthropic_request(
             system_prompt, user_prompt, required_fields + optional_fields, task

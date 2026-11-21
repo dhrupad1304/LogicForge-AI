@@ -61,8 +61,12 @@ Frontend on Vercel, backend on Render (Docker). Step-by-step guide:
 Copy `backend/.env.example` to `backend/.env` and set:
 - `LOGICFORGE_AI_PROVIDER=ollama` (default) with `LOGICFORGE_OLLAMA_MODEL`
   for a local model, or
+- `LOGICFORGE_AI_PROVIDER=groq` / `gemini` / `openrouter` with a free
+  `LOGICFORGE_AI_API_KEY` for a larger free cloud model, or
 - `LOGICFORGE_AI_PROVIDER=anthropic` with `ANTHROPIC_API_KEY` to use Claude
-  (much better on FSMs, ALUs and protocols; billed per use).
+  (best on FSMs, ALUs and protocols; billed per use), or
+- `LOGICFORGE_AI_PROVIDER=none` to switch AI off (simulation, waveforms and
+  schematics keep working).
 
 Restart the backend after changing it. The active model is shown in the
 top-right corner of the app.

@@ -1,6 +1,10 @@
 # Render Blueprint for the LogicForge backend (the frontend runs on Vercel).
 # In Render: New + > Blueprint > pick this repository. Render then asks for
-# the values marked `sync: false` (they are secrets and not stored here).
+# the values marked `sync: false` (secrets, not stored here).
+#
+# Everything here is free: Render's free plan and a free-tier AI provider.
+# Leave LOGICFORGE_AI_API_KEY empty to run with AI switched off (simulation,
+# waveforms and schematics still work); add a free Groq key any time later.
 services:
   - type: web
     name: logicforge-backend
@@ -10,11 +14,11 @@ services:
     plan: free
     healthCheckPath: /
     envVars:
+      # groq | gemini | openrouter (free tiers), anthropic (paid), none
       - key: LOGICFORGE_AI_PROVIDER
-        value: anthropic
-      - key: LOGICFORGE_ANTHROPIC_MODEL
-        value: claude-opus-5-5
-      - key: ANTHROPIC_API_KEY
+        value: groq
+      # Free key from https://console.groq.com/keys (optional: empty = AI off)
+      - key: LOGICFORGE_AI_API_KEY
         sync: false
       # Shared password for the site. Leave empty only for a private test.
       - key: LOGICFORGE_ACCESS_PASSWORD

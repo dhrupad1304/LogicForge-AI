@@ -39,21 +39,39 @@ class SchematicRequest(BaseModel):
     view: str = Field(default="auto", pattern="^(auto|gates|rtl)$")
 
 
+def _active_model() -> str:
+    if config.AI_PROVIDER == "anthropic":
+        return config.ANTHROPIC_MODEL
+    if config.AI_PROVIDER in config.OPENAI_COMPATIBLE_PRESETS:
+        return config.AI_MODEL
+    if config.AI_PROVIDER == "ollama":
+        return config.OLLAMA_MODEL
+    return ""
+
+
 @router.get("/model")
 def model_info():
-    """The AI model the backend is configured to use."""
+    """The AI model the backend is configured to use, and whether AI is on."""
+    reason = config.ai_disabled_reason()
     return {
         "provider": config.AI_PROVIDER,
-        "model": (
-            config.ANTHROPIC_MODEL if config.AI_PROVIDER == "anthropic"
-            else config.OLLAMA_MODEL
-        ),
+        "model": _active_model(),
         "label": config.model_label(),
+        "ai_enabled": not reason,
+        "ai_disabled_reason": reason,
     }
+
+
+def require_ai() -> None:
+    """Refuse AI requests clearly when AI is switched off on this server."""
+    reason = config.ai_disabled_reason()
+    if reason:
+        raise HTTPException(status_code=503, detail=reason)
 
 
 @router.post("/generate")
 def generate(req: Prompt):
+    require_ai()
     try:
         result = generate_design_and_testbench(req.prompt)
 
@@ -101,6 +119,7 @@ def simulate_code(req: Code):
 
 @router.post("/debug")
 def debug_code(req: DebugRequest):
+    require_ai()
     try:
         result = debug_verilog(
             module_code=req.module_code,
@@ -128,6 +147,7 @@ def schematic(req: SchematicRequest):
 
 @router.post("/generate-testbench")
 def generate_testbench_code(req: TestbenchRequest):
+    require_ai()
     try:
         result = generate_testbench_for(req.module_code)
 

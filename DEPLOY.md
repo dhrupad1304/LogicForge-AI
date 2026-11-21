@@ -7,13 +7,14 @@ LogicForge has two parts that deploy to different places:
 | **Frontend** (Next.js, `frontend/`) | **Vercel** | Built for Next.js; free; fast. |
 | **Backend** (FastAPI, `backend/`) | **Render** (or any Docker host) | Needs native tools (Icarus Verilog, Yosys) and runs them as processes, which Vercel's serverless functions cannot do. |
 
-The deployed backend uses the **Claude API** by default: cloud servers have no
-GPU, so a local Ollama model would take minutes per request.
+**Everything can stay free:** Render's free plan, Vercel's hobby plan and a
+free-tier AI provider. Cloud servers have no GPU for Ollama, so the deployed
+backend uses a free cloud AI API (Groq by default) instead, or runs with AI
+switched off.
 
-You need: a GitHub account, a [Render](https://render.com) account, a
-[Vercel](https://vercel.com) account and an Anthropic API key from
-[platform.claude.com](https://platform.claude.com) (billed per use; a
-generation costs a few cents).
+You need: a GitHub account, a [Render](https://render.com) account and a
+[Vercel](https://vercel.com) account. Optional: a free
+[Groq](https://console.groq.com) API key for the AI features.
 
 ---
 
@@ -33,10 +34,10 @@ git push -u origin main
 1. In Render: **New + → Blueprint**, connect GitHub and pick the repository.
    Render reads `render.yaml` and creates the `logicforge-backend` service.
 2. Render asks for the secret values:
-   - `ANTHROPIC_API_KEY`: your Anthropic API key.
+   - `LOGICFORGE_AI_API_KEY`: your free Groq key (see "Free AI" below), or
+     **leave it empty** to start with AI switched off. You can add it later.
    - `LOGICFORGE_ACCESS_PASSWORD`: a password you choose and give to the
-     people who may use the site. Use something long; anyone with it can spend
-     your API credit (within the hourly limits).
+     people who may use the site. Use something long.
    - `LOGICFORGE_ALLOWED_ORIGINS`: leave as `http://localhost:3000` for now;
      you will set it to the Vercel URL in step 4.
 3. Wait for the first build (several minutes: it installs Icarus Verilog,
@@ -64,7 +65,32 @@ and save; Render restarts the backend.
 To also allow Vercel **preview** deployments, add
 `LOGICFORGE_ALLOWED_ORIGIN_REGEX`, e.g. `https://logicforge-[a-z0-9-]+\.vercel\.app`.
 
-Open the Vercel URL, enter the access password, and generate a circuit.
+Open the Vercel URL, enter the access password, and generate a circuit
+(or, with AI off, open a design and run a simulation).
+
+---
+
+## Free AI (no card, no charges)
+
+| Provider | `LOGICFORGE_AI_PROVIDER` | Get a free key |
+|---|---|---|
+| Groq (default) | `groq` | https://console.groq.com/keys |
+| Google Gemini | `gemini` | https://aistudio.google.com/apikey |
+| OpenRouter (`:free` models) | `openrouter` | https://openrouter.ai/keys |
+
+Put the key in Render → **Environment** → `LOGICFORGE_AI_API_KEY` and, if you
+switch provider, change `LOGICFORGE_AI_PROVIDER`. Render restarts the
+service; the header then shows the model instead of "AI off".
+
+Free tiers have **rate limits** (requests and tokens per minute or day). A
+Generate makes 2-5 model calls; when a limit is hit LogicForge waits briefly
+and retries, then shows "free-tier rate limit reached". Model names change
+over time: if you see "does not offer the model", set `LOGICFORGE_AI_MODEL`
+to a model from the provider's list. Read each provider's terms: some free
+tiers may use prompts to improve their models.
+
+A paid Claude key (`LOGICFORGE_AI_PROVIDER=anthropic`, `ANTHROPIC_API_KEY`)
+is also supported and is best for complex circuits; it is never required.
 
 ---
 
@@ -72,8 +98,11 @@ Open the Vercel URL, enter the access password, and generate a circuit.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `LOGICFORGE_AI_PROVIDER` | `anthropic` in Docker, `ollama` locally | Which AI to use |
-| `ANTHROPIC_API_KEY` | none | Claude API key |
+| `LOGICFORGE_AI_PROVIDER` | `groq` on Render, `none` in Docker, `ollama` locally | `groq`, `gemini`, `openrouter`, `openai`, `anthropic`, `ollama` or `none` |
+| `LOGICFORGE_AI_API_KEY` | none (AI off) | Key for groq / gemini / openrouter / openai |
+| `LOGICFORGE_AI_MODEL` | provider default | Model name at that provider |
+| `LOGICFORGE_AI_BASE_URL` | provider default | API URL (required for `openai`) |
+| `ANTHROPIC_API_KEY` | none | Claude API key (paid, optional) |
 | `LOGICFORGE_ANTHROPIC_MODEL` | `claude-opus-5-5` | Claude model |
 | `LOGICFORGE_ANTHROPIC_EFFORT` | `high` | Thinking depth: low … max |
 | `LOGICFORGE_ACCESS_PASSWORD` | empty (no password) | Shared site password |

@@ -26,10 +26,11 @@ RUN useradd --create-home --uid 10001 logicforge \
     && chown -R logicforge:logicforge /app/workspace
 USER logicforge
 
-# Servers have no GPU for a local model, so the image defaults to Claude.
+# Servers have no GPU for a local model. AI is off unless the host sets
+# LOGICFORGE_AI_PROVIDER (e.g. groq) and its key; nothing is ever billed.
 ENV PORT=8000 \
     PYTHONUNBUFFERED=1 \
-    LOGICFORGE_AI_PROVIDER=anthropic
+    LOGICFORGE_AI_PROVIDER=none
 
 EXPOSE 8000
 
