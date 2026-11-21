@@ -40,3 +40,4 @@ backend/workspace/
 # Test cache
 .pytest_cache/
 frontend/.next-prod/
+.claude/
