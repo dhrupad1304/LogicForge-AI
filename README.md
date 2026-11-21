@@ -40,6 +40,10 @@ npm install
 npm run dev
 ```
 
+## Deployment
+Frontend on Vercel, backend on Render (Docker). Step-by-step guide:
+[DEPLOY.md](DEPLOY.md).
+
 ## How generation is verified
 1. The AI writes the **design** only. It is compile-checked with Icarus
    Verilog (Verilog-2005 rules), common mistakes are fixed in code, and the

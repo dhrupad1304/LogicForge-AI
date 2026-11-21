@@ -1,0 +1,28 @@
+# Render Blueprint for the LogicForge backend (the frontend runs on Vercel).
+# In Render: New + > Blueprint > pick this repository. Render then asks for
+# the values marked `sync: false` (they are secrets and not stored here).
+services:
+  - type: web
+    name: logicforge-backend
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: LOGICFORGE_AI_PROVIDER
+        value: anthropic
+      - key: LOGICFORGE_ANTHROPIC_MODEL
+        value: claude-opus-5-5
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      # Shared password for the site. Leave empty only for a private test.
+      - key: LOGICFORGE_ACCESS_PASSWORD
+        sync: false
+      # Your Vercel URL, e.g. https://logicforge.vercel.app
+      - key: LOGICFORGE_ALLOWED_ORIGINS
+        sync: false
+      - key: LOGICFORGE_AI_REQUESTS_PER_HOUR
+        value: "30"
+      - key: LOGICFORGE_COMPUTE_REQUESTS_PER_HOUR
+        value: "300"

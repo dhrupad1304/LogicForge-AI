@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
-import { API } from "../utils/api";
+import {
+  API,
+  UNAUTHORIZED_EVENT,
+  clearAccessPassword,
+  getAccessPassword,
+  setAccessPassword,
+} from "../utils/api";
 
 type VCDVariable = {
   id: string;
@@ -784,6 +790,61 @@ function SchematicPanel({
   );
 }
 
+// Shown when the deployed backend requires the shared access password.
+function PasswordGate({
+  error,
+  checking,
+  onSubmit,
+}: {
+  error: string;
+  checking: boolean;
+  onSubmit: (password: string) => void;
+}) {
+  const [password, setPassword] = useState("");
+  return (
+    <main className="flex min-h-screen items-center justify-center bg-bg px-4 text-fg">
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (password.trim()) onSubmit(password.trim());
+        }}
+        className="w-full max-w-sm rounded-lg border border-line bg-surface p-6"
+      >
+        <div className="mb-5 flex items-center gap-2.5">
+          <LogoMark />
+          <span className="text-[15px] font-semibold tracking-tight">LogicForge</span>
+        </div>
+        <h1 className="text-sm font-medium">This workspace is private</h1>
+        <p className="mt-1 text-xs leading-5 text-fg-muted">
+          Enter the access password you were given.
+        </p>
+        <label htmlFor="access-password" className="sr-only">
+          Access password
+        </label>
+        <input
+          id="access-password"
+          type="password"
+          autoComplete="current-password"
+          autoFocus
+          value={password}
+          onChange={(event) => setPassword(event.target.value)}
+          className="mt-4 block h-9 w-full rounded-md border border-line-strong bg-surface-2 px-3 text-sm text-fg placeholder:text-fg-subtle focus:border-accent/60 focus:outline-none"
+          placeholder="Password"
+        />
+        {error && <p className="mt-2 text-xs text-fail">{error}</p>}
+        <button
+          type="submit"
+          disabled={checking || !password.trim()}
+          className="mt-4 inline-flex h-9 w-full items-center justify-center gap-2 rounded-md bg-accent text-[13px] font-medium text-accent-fg hover:bg-accent-hover disabled:opacity-50"
+        >
+          {checking && <span className="lf-spinner" />}
+          {checking ? "Checking" : "Unlock"}
+        </button>
+      </form>
+    </main>
+  );
+}
+
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [moduleCode, setModuleCode] = useState("");
@@ -796,6 +857,9 @@ export default function Home() {
   const [simulationSuccess, setSimulationSuccess] = useState<boolean | null>(null);
   const [simulationVerdict, setSimulationVerdict] = useState<string | null>(null);
   const [modelLabel, setModelLabel] = useState("");
+  const [locked, setLocked] = useState(false);
+  const [unlocking, setUnlocking] = useState(false);
+  const [unlockError, setUnlockError] = useState("");
   const [schematic, setSchematic] = useState<Schematic | null>(null);
   const [schematicOpen, setSchematicOpen] = useState(false);
   const [schematicLoading, setSchematicLoading] = useState(false);
@@ -857,13 +921,53 @@ export default function Home() {
   };
 
   useEffect(() => {
+    const showGate = () => {
+      setLocked(true);
+    };
+    window.addEventListener(UNAUTHORIZED_EVENT, showGate);
+
+    // Ask the backend whether a password is needed before loading anything.
+    API.get("/auth/status")
+      .then((response) => {
+        if (response.data?.password_required && !getAccessPassword()) {
+          setLocked(true);
+        } else {
+          loadWorkspace();
+        }
+      })
+      .catch(() => loadWorkspace());
+
+    return () => window.removeEventListener(UNAUTHORIZED_EVENT, showGate);
+    // Run once on mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadWorkspace = () => {
     void loadProjectFiles("");
     API.get("/model")
       .then((response) => setModelLabel(response.data?.label || ""))
       .catch(() => setModelLabel(""));
-    // Load the workspace root once on mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  };
+
+  const unlock = async (password: string) => {
+    setUnlocking(true);
+    setUnlockError("");
+    setAccessPassword(password);
+    try {
+      await API.get("/model");
+      setLocked(false);
+      loadWorkspace();
+    } catch (error: any) {
+      clearAccessPassword();
+      setUnlockError(
+        error.response?.status === 401
+          ? "That password is not correct."
+          : "The server could not be reached. Try again shortly."
+      );
+    } finally {
+      setUnlocking(false);
+    }
+  };
 
   // Judge by the file name only, so a folder called "testbench" does not
   // turn every design file inside it into a testbench.
@@ -1297,6 +1401,10 @@ export default function Home() {
               text: `Pass${simulationTests != null ? ` · ${simulationTests} tests` : ""}`,
             }
         : { tone: "border-fail/30 bg-fail-soft text-fail", text: "Fail" };
+
+  if (locked) {
+    return <PasswordGate error={unlockError} checking={unlocking} onSubmit={unlock} />;
+  }
 
   return (
     <main className="min-h-screen bg-bg text-fg">

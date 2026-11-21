@@ -1,0 +1,11 @@
+# Keep the image small and free of local secrets and user files.
+.env
+.env.*
+!.env.example
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/
+workspace/
+services/ai_service_openai_backup.py

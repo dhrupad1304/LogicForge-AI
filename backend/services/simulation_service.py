@@ -1,6 +1,8 @@
 
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -9,6 +11,32 @@ COMPILE_TIMEOUT = 15
 SIMULATION_TIMEOUT = 15
 MAX_CODE_SIZE = 50000
 MAX_VCD_SIZE = 1000000
+
+# Hard caps for every tool run on user-supplied Verilog (iverilog, vvp,
+# yosys), applied with ulimit in a wrapper shell: CPU seconds, largest file
+# written (KB) and, on Linux, address space (KB). They stop a runaway
+# design from exhausting a deployed server.
+TOOL_CPU_SECONDS = 30
+TOOL_MAX_FILE_KB = 64 * 1024
+TOOL_MAX_MEMORY_KB = 1024 * 1024
+
+
+MISSING_ICARUS = (
+    "Icarus Verilog was not found. Install iverilog and vvp before simulating."
+)
+
+
+def icarus_installed() -> bool:
+    return bool(shutil.which("iverilog") and shutil.which("vvp"))
+
+
+def limited(command: list[str]) -> list[str]:
+    """Wrap a command so it runs under resource limits."""
+    limits = f"ulimit -t {TOOL_CPU_SECONDS} -f {TOOL_MAX_FILE_KB}"
+    if sys.platform.startswith("linux"):
+        limits += f" -v {TOOL_MAX_MEMORY_KB}"
+    return ["/bin/sh", "-c", f'{limits} && exec "$@"', "logicforge-sandbox", *command]
+
 
 # Constructs that let Verilog read or write files on the host. Simulation runs
 # as the backend's user account, so these are rejected before compiling.
@@ -213,6 +241,10 @@ def compile_only(
             "testbench_code": testbench_code,
         }
 
+    if not icarus_installed():
+        return {"success": False, "errors": MISSING_ICARUS, "warnings": None,
+                "testbench_code": testbench_code, "tool_missing": True}
+
     try:
         with tempfile.TemporaryDirectory(prefix="logicforge_") as temp_dir:
             working_dir = Path(temp_dir)
@@ -221,13 +253,13 @@ def compile_only(
                 (working_dir / filename).write_text(source, encoding="utf-8")
 
             proc = subprocess.run(
-                [
+                limited([
                     "iverilog",
                     "-g2005" if strict else "-g2012",
                     "-o",
                     str(working_dir / "compile_check.out"),
                     *[str(working_dir / name) for name in sources],
-                ],
+                ]),
                 capture_output=True,
                 text=True,
                 timeout=COMPILE_TIMEOUT,
@@ -336,6 +368,9 @@ def simulate(
             )
         }
 
+    if not icarus_installed():
+        return {"success": False, "error": MISSING_ICARUS}
+
     try:
         with tempfile.TemporaryDirectory(prefix="logicforge_") as temp_dir:
 
@@ -367,7 +402,7 @@ def simulate(
 
             try:
                 compile_proc = subprocess.run(
-                    compile_command,
+                    limited(compile_command),
                     capture_output=True,
                     text=True,
                     timeout=COMPILE_TIMEOUT,
@@ -389,7 +424,7 @@ def simulate(
 
             try:
                 run_proc = subprocess.run(
-                    ["vvp", str(output_file)],
+                    limited(["vvp", str(output_file)]),
                     capture_output=True,
                     text=True,
                     timeout=SIMULATION_TIMEOUT,

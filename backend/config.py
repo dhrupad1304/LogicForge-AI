@@ -27,6 +27,17 @@ ANTHROPIC_EFFORT = os.getenv("LOGICFORGE_ANTHROPIC_EFFORT", "high")
 # before it returns its best result.
 MAX_GENERATION_ATTEMPTS = int(os.getenv("LOGICFORGE_MAX_ATTEMPTS", "3"))
 
+# ---------------------------------------------------------------------------
+# Deployment
+# ---------------------------------------------------------------------------
+
+# Shared access password. Empty (the default, for local use) = no password.
+ACCESS_PASSWORD = os.getenv("LOGICFORGE_ACCESS_PASSWORD", "")
+
+# Per-visitor hourly limits (0 = unlimited). AI requests cost API money.
+AI_REQUESTS_PER_HOUR = int(os.getenv("LOGICFORGE_AI_REQUESTS_PER_HOUR", "30"))
+COMPUTE_REQUESTS_PER_HOUR = int(os.getenv("LOGICFORGE_COMPUTE_REQUESTS_PER_HOUR", "300"))
+
 if AI_PROVIDER not in ("ollama", "anthropic"):
     raise ValueError(
         f"LOGICFORGE_AI_PROVIDER must be 'ollama' or 'anthropic', not {AI_PROVIDER!r}"

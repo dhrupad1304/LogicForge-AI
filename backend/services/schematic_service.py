@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from services.simulation_service import MAX_CODE_SIZE, find_unsafe_constructs
+from services.simulation_service import MAX_CODE_SIZE, find_unsafe_constructs, limited
 
 YOSYS_TIMEOUT = 30
 DRAW_TIMEOUT = 30
@@ -55,11 +55,11 @@ def _synthesize(work: Path, view: str) -> tuple[dict | None, str]:
 
     out = work / f"{view}.json"
     proc = subprocess.run(
-        [
+        limited([
             "yosys", "-q", "-p",
             f"read_verilog -sv design.v; hierarchy -auto-top; {_SCRIPTS[view]}; "
             f"write_json {out.name}",
-        ],
+        ]),
         capture_output=True,
         text=True,
         timeout=YOSYS_TIMEOUT,
