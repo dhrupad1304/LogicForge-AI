@@ -19,7 +19,7 @@
 
   --color-fg: #ececee;
   --color-fg-muted: #a0a0a8;
-  --color-fg-subtle: #6c6c75;
+  --color-fg-subtle: #8a8a93; /* >= 4.5:1 on every surface (WCAG AA) */
 
   --color-accent: #f0a43a;
   --color-accent-hover: #f6b85f;

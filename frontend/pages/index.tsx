@@ -701,6 +701,7 @@ function SchematicPanel({
             onClick={() => onDraw("gates")}
             disabled={loading}
             className={segment(schematic?.view === "gates")}
+            aria-pressed={schematic?.view === "gates"}
             title="Logic gates and flip-flops"
           >
             Gates
@@ -709,6 +710,7 @@ function SchematicPanel({
             onClick={() => onDraw("rtl")}
             disabled={loading}
             className={segment(schematic?.view === "rtl")}
+            aria-pressed={schematic?.view === "rtl"}
             title="Word-level blocks: adders, multiplexers, registers"
           >
             RTL
@@ -717,7 +719,7 @@ function SchematicPanel({
         {schematic && (
           <div className="ml-1 flex items-center gap-0.5 rounded-md border border-line bg-surface-2 p-0.5">
             {(["fit", 1, 2] as const).map((level) => (
-              <button key={String(level)} onClick={() => setZoom(level)} className={segment(zoom === level)}>
+              <button key={String(level)} onClick={() => setZoom(level)} className={segment(zoom === level)} aria-pressed={zoom === level}>
                 {level === "fit" ? "Fit" : `${level}×`}
               </button>
             ))}
@@ -1573,7 +1575,7 @@ export default function Home() {
                         onClick={() => void renameProjectItem(item.path)}
                         title="Rename"
                         aria-label={`Rename ${item.name}`}
-                        className="rounded p-1 text-fg-subtle hover:text-fg"
+                        className="inline-flex h-6 w-6 items-center justify-center rounded text-fg-subtle hover:text-fg"
                       >
                         <Icon name="pencil" className="h-3 w-3" />
                       </button>
@@ -1581,7 +1583,7 @@ export default function Home() {
                         onClick={() => void deleteProjectItem(item.path)}
                         title="Delete"
                         aria-label={`Delete ${item.name}`}
-                        className="rounded p-1 text-fg-subtle hover:text-fail"
+                        className="inline-flex h-6 w-6 items-center justify-center rounded text-fg-subtle hover:text-fail"
                       >
                         <Icon name="x" className="h-3 w-3" />
                       </button>
@@ -1772,7 +1774,7 @@ export default function Home() {
                   loading={<div className="h-full w-full bg-code" />}
                   value={moduleCode}
                   onChange={(value) => setModuleCode(value || "")}
-                  options={EDITOR_OPTIONS}
+                  options={{ ...EDITOR_OPTIONS, ariaLabel: "Verilog design editor" }}
                 />
               </div>
             </section>
@@ -1827,7 +1829,7 @@ export default function Home() {
                   loading={<div className="h-full w-full bg-code" />}
                   value={testbenchCode}
                   onChange={(value) => setTestbenchCode(value || "")}
-                  options={EDITOR_OPTIONS}
+                  options={{ ...EDITOR_OPTIONS, ariaLabel: "Testbench editor" }}
                 />
               </div>
             </section>
